@@ -66,6 +66,7 @@ byte doGet(String _host, uint16_t _port, String _toSend);
 void readGoogleSheetTitles();
 void readGoogleSheet();
 void send2GoogleSheets();
+void buttonCheck(void *parameter);
 void displayManager(void * parameter);
 void drawScrollString(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen0, int16_t offset, const char *s);
 void drawHeader(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen1, const char *s);
@@ -73,7 +74,7 @@ void drawIcons(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen);
 void drawWeather(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen2, String symbol, String degree);
 bool drawMainScreen(const char *s, bool scroll, String weight, String unit);
 void drawInfoScreen(const char *s, String weight, String unit);
-void check_button_event(void);
+int8_t check_button_event(int8_t button_event);
 int8_t drawFormula();
 int8_t drawDBData();
 byte drawMenu(byte menuPlace);
@@ -88,7 +89,10 @@ void helpScreen();
 // FreeRTOS defines
 // ----------------------------
 TaskHandle_t displayTask;
+TaskHandle_t buttonTask;
 QueueHandle_t queue;
+QueueHandle_t controlCase;
+QueueHandle_t state;
 
 // ----------------------------
 // Configurations
@@ -272,8 +276,13 @@ long down_millis = millis();
 long select_millis = millis();
 // Marker for menu
 bool inMenu = false;
-int8_t button_event = 0;    // set this to 0, once the event has been processed
 bool mainScreenScroll = false;
+// struct for states
+struct stateStruct{
+    bool countSet = false;
+    bool keepCount = true;
+    bool tareNow = false;
+};
 
 /** placeholders for measurements **/
 float keepWeight = 0.0f;
@@ -293,10 +302,22 @@ RTC_DATA_ATTR int bootCount = 0; // Store boot count
 void setup() {
   Serial.begin(115200); // Start serial communication
 
-  queue = xQueueCreate(5, sizeof(struct queueStruct));
+  queue = xQueueCreate(2, sizeof(struct queueStruct));
   
   if(queue == NULL){
-    Serial.println("Error creating the queue");
+    Serial.println("Error creating queueStruct");
+  }
+
+  state = xQueueCreate(2, sizeof(struct stateStruct));
+
+  if(state == NULL){
+    Serial.println("Error creating stateStruct");
+  }
+
+  controlCase = xQueueCreate(1, sizeof(setCase));
+
+  if (controlCase == NULL){
+    Serial.println("Error creating case queue");
   }
 
   xTaskCreatePinnedToCore(
@@ -306,36 +327,18 @@ void setup() {
     NULL,
     1,
     &displayTask,
-    1);
+    0);
   delay(500);  // needed to start-up task1
 
-  /** buttons **/
-  pinMode(LEFT_BUT, INPUT_PULLUP);
-  pinMode(RIGHT_BUT, INPUT_PULLUP);
-  pinMode(UP_BUT, INPUT_PULLUP);
-  pinMode(DOWN_BUT, INPUT_PULLUP);
-  pinMode(SELECT_BUT, INPUT_PULLUP);
-
-  attachInterrupt(digitalPinToInterrupt(LEFT_BUT), setLeft, FALLING);
-  attachInterrupt(digitalPinToInterrupt(RIGHT_BUT), setRight, FALLING);
-  attachInterrupt(digitalPinToInterrupt(UP_BUT), setUp, FALLING);
-  attachInterrupt(digitalPinToInterrupt(DOWN_BUT), setDown, FALLING);
-  attachInterrupt(digitalPinToInterrupt(SELECT_BUT), doSelect, CHANGE);
-
-  /* U8g2 Project: SSD1306 Test Board */
-  pinMode(SCREEN1_RES, OUTPUT);
-  pinMode(SCREEN2_RES, OUTPUT);
-  digitalWrite(SCREEN1_RES, 0);
-  digitalWrite(SCREEN2_RES, 0);
-
-  u8g2.setI2CAddress(SCREEN1_ADR);
-  u8g2.setBusClock(1200000);
-  u8g2.begin();
-  u8g2.enableUTF8Print();
-  dataScreen.setI2CAddress(SCREEN2_ADR);
-  dataScreen.setBusClock(1200000);
-  dataScreen.begin(/*Select=*/ RIGHT_BUT, /*Right/Next=*/ U8X8_PIN_NONE, /*Left/Prev=*/ U8X8_PIN_NONE, /*Up=*/ UP_BUT, /*Down=*/ DOWN_BUT, /*Home/Cancel=*/ LEFT_BUT);//SELECT_BUT, /*Home/Cancel=*/ A6
-  dataScreen.enableUTF8Print();
+  xTaskCreatePinnedToCore(
+    buttonCheck,
+    "buttonTask",
+    1024,
+    NULL,
+    2,
+    &buttonTask,
+    0);
+  delay(500);  // needed to start-up task1
 
   rtc_clk_cpu_freq_set(RTC_CPU_FREQ_80M); // Set SoC RTC to 80MHz, for HX711 communication
 
@@ -456,13 +459,14 @@ void setup() {
 void loop() {
 
   byte memCase = setCase;
-  bool countSet = false;
-  bool keepCount = true;
-  bool tareNow = false;
-
 
   if(queue == NULL){
-    Serial.println("Queue was not created");
+    Serial.println("structQueue was not created");
+    return;
+  }
+
+  if (state == NULL){
+    Serial.println("stateQueue was not created");
     return;
   }
 
@@ -474,7 +478,8 @@ void loop() {
   xQueueSend(queue, &sendQueue, 0);
   // Serial.printf("Loop core %d\n ", xPortGetCoreID());
 
-
+  struct stateStruct sendState;
+  xQueueReceive(state, &sendState, 0);
 
   //receive from serial terminal
   //should be handled in ISR, no simple implementation in Arduino IDE for ESP32
@@ -524,8 +529,8 @@ void loop() {
       Serial.printf("wifi: %d\n", wifiOnOff);
       setCase = 6;
     }
-    else if (inputString == "set\r\n") countSet = true, keepCount = false;
-    else if (inputString == "setTare\r\n") countSet = true, keepCount = false, tareNow = true;
+    else if (inputString == "set\r\n") sendState.countSet = true, sendState.keepCount = false;
+    else if (inputString == "setTare\r\n") sendState.countSet = true, sendState.keepCount = false, sendState.tareNow = true;
     else if (inputString[0] >= 49 && inputString[0] <= 57 && inputString[1] == '\r') {
       selection = inputString.toInt() - 1;
       if (selection <= MAX_INGREDIENTS) {
@@ -560,94 +565,17 @@ void loop() {
 
 
 
-  /**
-      menu handlers
-      based on u8g2.getMenuEvent()
-      should copy and edit for working with touch sensors (or other)
-
-      prototypes and functions in files:
-      u8g2.h:uint8_t u8g2_UserInterfaceSelectionList(u8g2_t *u8g2, const char *title, uint8_t start_pos, const char *sl);
-      u8x8.h:uint8_t u8x8_UserInterfaceSelectionList(u8x8_t *u8x8, const char *title, uint8_t start_pos, const char *sl);
-      u8x8_selection_list.c:uint8_t u8x8_UserInterfaceSelectionList(u8x8_t *u8x8, const char *title, uint8_t start_pos, const char *sl)
-      u8g2_selection_list.c:uint8_t u8g2_UserInterfaceSelectionList(u8g2_t *u8g2, const char *title, uint8_t start_pos, const char *sl)
-
-      prototypes and functions for confirmation screen:
-      u8g2.h:uint8_t u8g2_UserInterfaceMessage(u8g2_t *u8g2, const char *title1, const char *title2, const char *title3, const char *buttons);
-      u8x8.h:uint8_t u8x8_UserInterfaceMessage(u8x8_t *u8x8, const char *title1, const char *title2, const char *title3, const char *buttons);
-      u8x8_message.c:uint8_t u8x8_UserInterfaceMessage(u8x8_t *u8x8, const char *title1, const char *title2, const char *title3, const char *buttons)
-      u8g2_message.c:uint8_t u8g2_UserInterfaceMessage(u8g2_t *u8g2, const char *title1, const char *title2, const char *title3, const char *buttons)
-
-   **/
-  check_button_event();
-  if (button_event == U8X8_MSG_GPIO_MENU_SELECT) {//select_set == true && (millis() - select_millis) > 10 &&
-    if (!inMenu) inMenu = true;
-    else {
-      ;
-    }
-  }
-
-  if (button_event == U8X8_MSG_GPIO_MENU_HOME) {//left_set == true && (millis() - left_millis) > 10 &&
-    if (inMenu) inMenu = false;
-    else {
-      unitSwitch();
-    }
-  }
-
-  /*
-   if (button_event == U8X8_MSG_GPIO_MENU_NEXT) {//right_set == true && (millis() - right_millis) > 10 &&
-      if (!inMenu) unitSwitch();
-      else {
-       ;
-      }
-   }
-  */
-
-  if (button_event == U8X8_MSG_GPIO_MENU_UP) {//up_set == true && (millis() - up_millis) > 10 &&
-    if (!inMenu) scale.tareNoDelay();
-    //    if (!digitalRead(UP_BUT)) {
-    //      menuPlace = (menuPlace == 0) ? (NUM_MENU_ITEMS - 1) : (menuPlace - 1);
-    //      up_set = false;
-    //      Serial.println(menuPlace);
-    //    }
-  }
-
-  if (button_event == U8X8_MSG_GPIO_MENU_DOWN) {//down_set == true && (millis() - down_millis) > 10 &&
-    if (!inMenu) {
-      Serial.println("set pressed");
-      if (setCase == 1 || setCase == 2) {
-        if (baseIngredient || !inheritCase) {
-          countSet = true;
-          keepCount = false;
-          Serial.print("case is:\t");
-          Serial.print(setCase);
-          Serial.println("\tsetting unit 1 / 100%");
-        }
-        if (inheritCase) {
-          measuredQuantities[selection] = oldAvgWeight;
-          if (ingredients[selection + 1] != "") selection++;
-          else selection = 0;
-        }
-        tareNow = true;
-      } 
-    }
-/*
-       if (!digitalRead(DOWN_BUT)) {
-         menuPlace = (menuPlace == (NUM_MENU_ITEMS - 1)) ? 0 : (menuPlace + 1);
-         down_set = false;
-         Serial.println(menuPlace);
-       }
-*/
-  }
-
-  if ( button_event > 0 )  // all known events are processed, clear event
-    button_event = 0;
-
+  
 
   //check if last tare operation is complete
   if (scale.getTareStatus() == true) {
     Serial.print("Tare complete\t");
     Serial.println(oldAvgWeight);
   }
+
+  // xQueueReceive(queue, &sendQueue, 5); // should probably use a better wait & recieve scheme
+  // setCase = 
+  xQueueReceive(controlCase, &setCase, 5);
 
   switch (setCase) {
     if (setCase != memCase) Serial.printf("setCase:\t%d,\tmemCase:\t%d\n", setCase, memCase);
@@ -657,17 +585,17 @@ void loop() {
       break;
 
     case 1:
-      scaleCount(countSet, keepCount);
+      scaleCount(sendState.countSet, sendState.keepCount);
       operationMode = "count";
       break;
 
     case 2:
       // set 100% by dividing current mass by selected quantity
-      if (countSet && baseIngredient) {
-        keepCount = true;
+      if (sendState.countSet && baseIngredient) {
+        sendState.keepCount = true;
         baseIngredient = false;
       }
-      percentageCount(countSet, keepCount, tareNow);
+      percentageCount(sendState.countSet, sendState.keepCount, sendState.tareNow);
       // operationMode = "percent";
       operationMode = (inheritCase) ? "formula%":"percentage";
       break;
@@ -1668,6 +1596,120 @@ void send2GoogleSheets() {
   toSend.remove(0);
 }
 
+/**
+      menu handlers
+      based on u8g2.getMenuEvent()
+      should copy and edit for working with touch sensors (or other)
+
+      prototypes and functions in files:
+      u8g2.h:uint8_t u8g2_UserInterfaceSelectionList(u8g2_t *u8g2, const char *title, uint8_t start_pos, const char *sl);
+      u8x8.h:uint8_t u8x8_UserInterfaceSelectionList(u8x8_t *u8x8, const char *title, uint8_t start_pos, const char *sl);
+      u8x8_selection_list.c:uint8_t u8x8_UserInterfaceSelectionList(u8x8_t *u8x8, const char *title, uint8_t start_pos, const char *sl)
+      u8g2_selection_list.c:uint8_t u8g2_UserInterfaceSelectionList(u8g2_t *u8g2, const char *title, uint8_t start_pos, const char *sl)
+
+      prototypes and functions for confirmation screen:
+      u8g2.h:uint8_t u8g2_UserInterfaceMessage(u8g2_t *u8g2, const char *title1, const char *title2, const char *title3, const char *buttons);
+      u8x8.h:uint8_t u8x8_UserInterfaceMessage(u8x8_t *u8x8, const char *title1, const char *title2, const char *title3, const char *buttons);
+      u8x8_message.c:uint8_t u8x8_UserInterfaceMessage(u8x8_t *u8x8, const char *title1, const char *title2, const char *title3, const char *buttons)
+      u8g2_message.c:uint8_t u8g2_UserInterfaceMessage(u8g2_t *u8g2, const char *title1, const char *title2, const char *title3, const char *buttons)
+
+**/
+void buttonCheck(void *parameter)
+{
+  int8_t button_event = 0;    // set this to 0, once the event has been processed
+
+  struct stateStruct sendState;
+
+  /** buttons **/
+  pinMode(LEFT_BUT, INPUT_PULLUP);
+  pinMode(RIGHT_BUT, INPUT_PULLUP);
+  pinMode(UP_BUT, INPUT_PULLUP);
+  pinMode(DOWN_BUT, INPUT_PULLUP);
+  pinMode(SELECT_BUT, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(LEFT_BUT), setLeft, FALLING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_BUT), setRight, FALLING);
+  attachInterrupt(digitalPinToInterrupt(UP_BUT), setUp, FALLING);
+  attachInterrupt(digitalPinToInterrupt(DOWN_BUT), setDown, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SELECT_BUT), doSelect, CHANGE);
+
+  while (1)
+  {
+    xQueueReceive(state, &sendState, 0);
+
+    button_event = check_button_event(button_event);
+    if (button_event == U8X8_MSG_GPIO_MENU_SELECT) {//select_set == true && (millis() - select_millis) > 10 &&
+      if (!inMenu) inMenu = true;
+      else {
+        ;
+      }
+    }
+
+    if (button_event == U8X8_MSG_GPIO_MENU_HOME) {//left_set == true && (millis() - left_millis) > 10 &&
+      if (inMenu) inMenu = false;
+      else {
+        unitSwitch();
+      }
+    }
+
+    /*
+    if (button_event == U8X8_MSG_GPIO_MENU_NEXT) {//right_set == true && (millis() - right_millis) > 10 &&
+        if (!inMenu) unitSwitch();
+        else {
+        ;
+        }
+    }
+    */
+
+    if (button_event == U8X8_MSG_GPIO_MENU_UP) {//up_set == true && (millis() - up_millis) > 10 &&
+      if (!inMenu) scale.tareNoDelay();
+      //    if (!digitalRead(UP_BUT)) {
+      //      menuPlace = (menuPlace == 0) ? (NUM_MENU_ITEMS - 1) : (menuPlace - 1);
+      //      up_set = false;
+      //      Serial.println(menuPlace);
+      //    }
+    }
+
+    if (button_event == U8X8_MSG_GPIO_MENU_DOWN) {//down_set == true && (millis() - down_millis) > 10 &&
+      if (!inMenu) {
+        Serial.println("set pressed");
+        if (setCase == 1 || setCase == 2) {
+          if (baseIngredient || !inheritCase) {
+            sendState.countSet = true;
+            sendState.keepCount = false;
+            Serial.print("case is:\t");
+            Serial.print(setCase);
+            Serial.println("\tsetting unit 1 / 100%");
+          }
+          if (inheritCase) {
+            measuredQuantities[selection] = oldAvgWeight;
+            if (ingredients[selection + 1] != "") selection++;
+            else selection = 0;
+          }
+          sendState.tareNow = true;
+        } 
+      }
+  /*
+        if (!digitalRead(DOWN_BUT)) {
+          menuPlace = (menuPlace == (NUM_MENU_ITEMS - 1)) ? 0 : (menuPlace + 1);
+          down_set = false;
+          Serial.println(menuPlace);
+        }
+  */
+    }
+
+    if ( button_event > 0 )  // all known events are processed, clear event
+      button_event = 0;
+
+    xQueueSend(state, &sendState, 5);
+
+    vTaskDelay(10); 
+    // not quite sure why the delay is needed, it's only here so wdt gets something?
+    // perhaps only an Arduino thing?
+    // see https://github.com/espressif/arduino-esp32/issues/595
+  }
+}
+
 /* Screen display manager task
  * runs in it's own loop, pinned to core 0 in setup()
  * meant to use parameters passed by loop() in a queue
@@ -1680,14 +1722,33 @@ void displayManager (void * parameter)
   struct queueStruct receiveQueue;
   String operationMem;
   float avgWeight4Display;
+
+  /* U8g2 Project: SSD1306 Test Board */
+  pinMode(SCREEN1_RES, OUTPUT);
+  pinMode(SCREEN2_RES, OUTPUT);
+  digitalWrite(SCREEN1_RES, 0);
+  digitalWrite(SCREEN2_RES, 0);
+
+  u8g2.setI2CAddress(SCREEN1_ADR);
+  u8g2.setBusClock(1200000);
+  u8g2.begin();
+  u8g2.enableUTF8Print();
+  dataScreen.setI2CAddress(SCREEN2_ADR);
+  dataScreen.setBusClock(1200000);
+  dataScreen.begin(/*Select=*/ RIGHT_BUT, /*Right/Next=*/ U8X8_PIN_NONE, /*Left/Prev=*/ U8X8_PIN_NONE, /*Up=*/ UP_BUT, /*Down=*/ DOWN_BUT, /*Home/Cancel=*/ LEFT_BUT);//SELECT_BUT, /*Home/Cancel=*/ A6
+  dataScreen.enableUTF8Print();
+
     /** screen display handler **/
   //  if ((millis() - displayTimer) > 250) {
   while (1) {
     xQueueReceive(queue, &receiveQueue, 100);
     byte localCase = receiveQueue.currentCase;
     if (operationMem != operationMode || avgWeight4Display != receiveQueue.mainMeasurement) {
-      if (inMenu) localCase = drawMenu(localCase), Serial.printf("setCase = %d\n", localCase);
-      else {
+      if (inMenu) {// set watch point?
+        localCase = drawMenu(localCase);
+        Serial.printf("setCase = %d\n", localCase);
+        xQueueOverwrite(controlCase, &localCase);
+      } else {
           operationMem = operationMode;
           avgWeight4Display = receiveQueue.mainMeasurement;
           String _messageInfo = "mode: ";
@@ -1755,8 +1816,10 @@ void displayManager (void * parameter)
           // setCase = drawMenu(setCase);
       }
     }
-    // displayTimer = millis();
-    // vTaskDelay(250);
+    vTaskDelay(10);
+    // not quite sure why the delay is needed, it's only here so wdt gets something?
+    // perhaps only an Arduino thing?
+    // see https://github.com/espressif/arduino-esp32/issues/595
   }
 }
 
@@ -1876,10 +1939,12 @@ void drawInfoScreen(const char *s, String weight, String unit)
 }
 
 /** keypad check function **/
-void check_button_event(void)
+int8_t check_button_event(int8_t button_event)
 {
   if ( button_event == 0 )
     button_event = dataScreen.getMenuEvent();
+
+  return button_event;
 }
 
 int8_t drawFormula() {
