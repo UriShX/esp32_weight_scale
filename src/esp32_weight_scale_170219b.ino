@@ -43,7 +43,7 @@
 #include <nvs.h>
 #include <nvs_flash.h>
 // include additional files
-#include "display.h"
+// #include "display.h"
 
 
 // ----------------------------
@@ -251,7 +251,7 @@ struct queueStruct {
   float mainMeasurement;
   float secMeasurement;
   byte currentCase;
-}
+};
 
 /** button assignment **/
 #define LEFT_BUT 15
@@ -304,10 +304,10 @@ void setup() {
     "displayTask",
     2048,
     NULL,
-    2,
+    1,
     &displayTask,
-    0);
-  delay(50);  // needed to start-up task1
+    1);
+  delay(500);  // needed to start-up task1
 
   /** buttons **/
   pinMode(LEFT_BUT, INPUT_PULLUP);
@@ -372,24 +372,25 @@ void setup() {
   }
   preferences.end();
 
+/*
+  Start BLE server
+   initBLE();
 
-  // Start BLE server
-  //  initBLE();
+ if (hasCredentials) {
+   // Check for available AP's
+   if (!scanWiFi()) {
+     Serial.println("Could not find any AP");
+   } else {
+     // If AP was found, start connection
+     connectWiFi();
 
-//  if (hasCredentials) {
-//    // Check for available AP's
-//    if (!scanWiFi()) {
-//      Serial.println("Could not find any AP");
-//    } else {
-//      // If AP was found, start connection
-//      connectWiFi();
-//
-//      bool isConnected = statusWIFI();
-//      while (!isConnected) {
-//        isConnected = statusWIFI();
-//      }
-//    }
-//  }
+     bool isConnected = statusWIFI();
+     while (!isConnected) {
+       isConnected = statusWIFI();
+     }
+   }
+ }
+*/
 
   delay(10);
 
@@ -432,7 +433,7 @@ void setup() {
   }
   for (byte ingCounter = 0; ingCounter < MAX_INGREDIENTS; ingCounter++) {
     ingredients[ingCounter].reserve(50);
-//    quantities[ingCounter].reserve(4);
+    // quantities[ingCounter].reserve(4);
   }
 
   Serial.printf("Internal Total heap %d, internal Free Heap %d\n",ESP.getHeapSize(),ESP.getFreeHeap());
@@ -453,6 +454,13 @@ void setup() {
 }
 
 void loop() {
+
+  byte memCase = setCase;
+  bool countSet = false;
+  bool keepCount = true;
+  bool tareNow = false;
+
+
   if(queue == NULL){
     Serial.println("Queue was not created");
     return;
@@ -461,15 +469,11 @@ void loop() {
   struct queueStruct sendQueue;
   sendQueue.mainMeasurement = oldAvgWeight;
   sendQueue.secMeasurement = percentage;
-  sendQueue.currentCase = setCase;
+  sendQueue.currentCase = memCase;
 
   xQueueSend(queue, &sendQueue, 0);
   // Serial.printf("Loop core %d\n ", xPortGetCoreID());
 
-  byte memCase = setCase;
-  bool countSet = false;
-  bool keepCount = true;
-  bool tareNow = false;
 
 
   //receive from serial terminal
@@ -541,11 +545,15 @@ void loop() {
       }
     }
 
-    //    for (byte i = 0; i < inputString.length(); i++) {
-    //      Serial.println(float(inputString[i]));
-    //    }
-    //    Serial.println(inputString);
-    // clear the string:
+/* 
+       for (byte i = 0; i < inputString.length(); i++) {
+         Serial.println(float(inputString[i]));
+       }
+       Serial.println(inputString);
+    clear the string:
+    
+*/
+
     inputString = "";
     stringComplete = false;
   }
@@ -585,12 +593,14 @@ void loop() {
     }
   }
 
-  //  if (button_event == U8X8_MSG_GPIO_MENU_NEXT) {//right_set == true && (millis() - right_millis) > 10 &&
-  //     if (!inMenu) unitSwitch();
-  //     else {
-  //      ;
-  //     }
-  //  }
+  /*
+   if (button_event == U8X8_MSG_GPIO_MENU_NEXT) {//right_set == true && (millis() - right_millis) > 10 &&
+      if (!inMenu) unitSwitch();
+      else {
+       ;
+      }
+   }
+  */
 
   if (button_event == U8X8_MSG_GPIO_MENU_UP) {//up_set == true && (millis() - up_millis) > 10 &&
     if (!inMenu) scale.tareNoDelay();
@@ -620,11 +630,13 @@ void loop() {
         tareNow = true;
       } 
     }
-    //    if (!digitalRead(DOWN_BUT)) {
-    //      menuPlace = (menuPlace == (NUM_MENU_ITEMS - 1)) ? 0 : (menuPlace + 1);
-    //      down_set = false;
-    //      Serial.println(menuPlace);
-    //    }
+/*
+       if (!digitalRead(DOWN_BUT)) {
+         menuPlace = (menuPlace == (NUM_MENU_ITEMS - 1)) ? 0 : (menuPlace + 1);
+         down_set = false;
+         Serial.println(menuPlace);
+       }
+*/
   }
 
   if ( button_event > 0 )  // all known events are processed, clear event
@@ -715,64 +727,69 @@ void loop() {
       break;
 
     case 7:
-      //    noInterrupts();//portDISABLE_INTERRUPTS();//
+      //    noInterrupts();//portDISABLE_INTERRUPTS();//detachInterrupt(doutPin);//, ISR, FALLING);
       cli();
-//      detachInterrupt(doutPin);//, ISR, FALLING);
+
       if (bleOnOff && !bleConnected) {
-//        esp_bt_controller_enable(ESP_BT_MODE_BTDM);
-//              btStart();
-        //      while (!btStarted());
-        // Start BLE server
-//        if (bleInitCounter == 0) {
+/*        esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+             btStart();
+             while (!btStarted());
+        Start BLE server
+       if (bleInitCounter == 0) {
+*/
           initBLE(true);
-//        } else {
-////          btStart();
-//          esp_bt_controller_enable(ESP_BT_MODE_BLE);
-//          delay(100);
-//          btStart();
-//          esp_bt_controller_init();
-//        }
+/*        } else {
+          btStart();
+         esp_bt_controller_enable(ESP_BT_MODE_BLE);
+         delay(100);
+         btStart();
+         esp_bt_controller_init();
+       }
+*/
         do {
           bleConnected = esp_bt_controller_get_status();
         } while (!bleConnected);
-//        bleInitCounter++;
-//        Serial.println(bleInitCounter);
+/*
+       bleInitCounter++;
+       Serial.println(bleInitCounter);
+*/
         Serial.printf("\n\ndisabling BLE will result in restarting the scale atm. Sorry!\n\n");
 //        Serial.printf("ble stat: %d\n", bleConnected);
       } else if (!bleOnOff && bleConnected) {
         
         ESP.restart();
-        
-//              esp_bluedroid_disable();
-//              esp_bluedroid_deinit();
-//        initBLE(false);
-//        delay(100);
-//        if (esp_bt_controller_disable() != 0) {
-//          Serial.println("could not disable BLE");
-//        } else {
-//          bleConnected = false;
-//        }
-//        delay(100);
-//        esp_bt_controller_deinit();
-//        delay(100);
-//        esp_bt_controller_mem_release(ESP_BT_MODE_BLE);// uncommented in BLEDevice.cpp
-//        btStop(); // Turn off bluetooth for saving battery
-//        delay(100);
-//        bleConnected = false;
-//        do {
-//          byte getBLEStat = esp_bt_controller_get_status();//BLEDevice::getInitialized();
-//          Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", getBLEStat, BLEDevice::getInitialized());
-//          if (getBLEStat == 2) bleConnected = false;
-////          bleConnected = 
-//          delay(250);
-//        } while (bleConnected);
+/*
+             esp_bluedroid_disable();
+             esp_bluedroid_deinit();
+       initBLE(false);
+       delay(100);
+       if (esp_bt_controller_disable() != 0) {
+         Serial.println("could not disable BLE");
+       } else {
+         bleConnected = false;
+       }
+       delay(100);
+       esp_bt_controller_deinit();
+       delay(100);
+       esp_bt_controller_mem_release(ESP_BT_MODE_BLE);// uncommented in BLEDevice.cpp
+       btStop(); // Turn off bluetooth for saving battery
+       delay(100);
+       bleConnected = false;
+       do {
+         byte getBLEStat = esp_bt_controller_get_status();//BLEDevice::getInitialized();
+         Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", getBLEStat, BLEDevice::getInitialized());
+         if (getBLEStat == 2) bleConnected = false;
+//          bleConnected = 
+         delay(250);
+       } while (bleConnected);
+*/
       }
       Serial.printf("ble stat: %d\n", bleConnected);
       Serial.println(ESP.getFreeHeap());
       setCase = memCase;
-      //    interrupts();//portENABLE_INTERRUPTS();//
+      //    interrupts();//portENABLE_INTERRUPTS();//attachInterrupt(doutPin, ISR, FALLING);
       sei();
-//      attachInterrupt(doutPin, ISR, FALLING);
+
       break;
 
       case 6:
@@ -812,12 +829,14 @@ void loop() {
       } else if (!wifiOnOff && wifiConnected) {
         Serial.println("turning wifi off");
         WiFi.disconnect(true);
-//        esp_wifi_disconnect();
-//        delay(100);
-//        esp_wifi_stop();
-//        delay(100);
-//        esp_wifi_deinit();
-//        delay(100);
+/*
+        esp_wifi_disconnect();
+        delay(100);
+        esp_wifi_stop();
+        delay(100);
+        esp_wifi_deinit();
+        delay(100);
+*/
         do {
           wifiConnected = statusWIFI();
         } while (wifiConnected);
@@ -1662,9 +1681,9 @@ void displayManager (void * parameter)
   String operationMem;
   float avgWeight4Display;
     /** screen display handler **/
-//   if ((millis() - displayTimer) > 250) {
+  //  if ((millis() - displayTimer) > 250) {
   while (1) {
-    xQueueReceive(queue, &receiveQueue, 250);
+    xQueueReceive(queue, &receiveQueue, 100);
     byte localCase = receiveQueue.currentCase;
     if (operationMem != operationMode || avgWeight4Display != receiveQueue.mainMeasurement) {
       if (inMenu) localCase = drawMenu(localCase), Serial.printf("setCase = %d\n", localCase);
