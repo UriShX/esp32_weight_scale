@@ -93,6 +93,7 @@ TaskHandle_t buttonTask;
 QueueHandle_t queue;
 QueueHandle_t controlCase;
 QueueHandle_t state;
+EventGroupHandle_t caseEventGroup;
 
 // ----------------------------
 // Configurations
@@ -231,6 +232,11 @@ boolean stringComplete = false;  // whether the string is complete
 byte setCase;
 String operationMode = "single";
 bool inheritCase = false;
+
+#define BIT_CASE BIT0
+#define BIT_WIFI BIT1
+#define BIT_BLE BIT2
+
 // Screen constructors
 #define SCREEN1_RES 19
 #define SCREEN2_RES 23
@@ -339,6 +345,8 @@ void setup() {
     &buttonTask,
     0);
   delay(500);  // needed to start-up task1
+
+  caseEventGroup  = xEventGroupCreate();
 
   rtc_clk_cpu_freq_set(RTC_CPU_FREQ_80M); // Set SoC RTC to 80MHz, for HX711 communication
 
@@ -573,9 +581,21 @@ void loop() {
     Serial.println(oldAvgWeight);
   }
 
-  // xQueueReceive(queue, &sendQueue, 5); // should probably use a better wait & recieve scheme
-  // setCase = 
-  xQueueReceive(controlCase, &setCase, 5);
+  int caseEventByte = xEventGroupGetBits(caseEventGroup);
+  if (caseEventByte != 0) {
+    if (bitRead(caseEventByte, BIT_CASE)) {
+      // xQueueReceive(queue, &sendQueue, 5); // should probably use a better wait & recieve scheme
+      // setCase = 
+      xQueueReceive(controlCase, &setCase, 0);
+    }
+    if (bitRead(caseEventByte, BIT_WIFI)) {
+      wifiOnOff = (wifiOnOff)?false:true;
+    }
+    if (bitRead(caseEventByte, BIT_BLE)) {
+      bleOnOff = (bleOnOff)?false:true;
+    }
+    xEventGroupClearBits(caseEventGroup, 0xff);
+  }
 
   switch (setCase) {
     if (setCase != memCase) Serial.printf("setCase:\t%d,\tmemCase:\t%d\n", setCase, memCase);
@@ -613,8 +633,9 @@ void loop() {
         sei();//not implemented in esp32
       } else {
         Serial.println("connect to WiFi (type 'wifi' in terminal) to complete this task");
-        setCase = memCase;
+        
       }
+      setCase = memCase;
       // menuPlace = memCase; 
       break;
 
@@ -632,7 +653,7 @@ void loop() {
         Serial.println("once you placed the quantity of the base ingredient, type 'set' or 'setTare'.");
         Serial.println("a list of remaining ingredients will then be displayed, choose the next ingredient, and so on.");
         inheritCase = true;
-        // setCase = 2;//memCase;
+        setCase = 2;//memCase;
       } else {
         Serial.println("connect to WiFi (type 'wifi' in terminal) to complete this task");
         setCase = memCase;
@@ -723,6 +744,7 @@ void loop() {
       case 6:
       // cli();
       detachInterrupt(doutPin);//, ISR, FALLING);
+      Serial.printf("wifiOnOff: %d, wifiConnected: %d\n", wifiOnOff, wifiConnected);
       if (wifiOnOff && !wifiConnected) {
         Serial.println("turning wifi on");
         if (hasCredentials) {
@@ -1745,61 +1767,71 @@ void displayManager (void * parameter)
     byte localCase = receiveQueue.currentCase;
     if (operationMem != operationMode || avgWeight4Display != receiveQueue.mainMeasurement) {
       if (inMenu) {// set watch point?
+        disableCore0WDT();
         localCase = drawMenu(localCase);
+        enableCore0WDT();
+        if (localCase == 6) xEventGroupSetBits(caseEventGroup, BIT_WIFI);
+        if (localCase == 7) xEventGroupSetBits(caseEventGroup, BIT_BLE);
         Serial.printf("setCase = %d\n", localCase);
         xQueueOverwrite(controlCase, &localCase);
+        xEventGroupSetBits(caseEventGroup, BIT0);
       } else {
-          operationMem = operationMode;
-          avgWeight4Display = receiveQueue.mainMeasurement;
-          String _messageInfo = "mode: ";
-          _messageInfo.concat(operationMem);
-          const char* message1 = (const char*)_messageInfo.c_str();
-          String var1 = String(avgWeight4Display, 1);
-          String param1 = unitStrings[unitSelect];
-          String var2 = "";
-          String param2 = "";
-          String _message = "mode: ";
-          switch (localCase) {
+        operationMem = operationMode;
+        avgWeight4Display = receiveQueue.mainMeasurement;
+        String _messageInfo = "mode: ";
+        _messageInfo.concat(operationMem);
+        const char* message1 = (const char*)_messageInfo.c_str();
+        String var1 = String(avgWeight4Display, 1);
+        String param1 = unitStrings[unitSelect];
+        String var2 = "";
+        String param2 = "";
+        String _message = "mode: ";
+
+        switch (localCase) {
           case 0:
-              var2 = var1;
-              param2 = param1;
+            var2 = var1;
+            param2 = param1;
           break;
 
           case 1:
-              var2 = oldCount;
-              param2 = "pcs";
+            var2 = oldCount;
+            param2 = "pcs";
           break;
 
           case 2:
-              var2 = percentage;
-              param2 = " %";
+            var2 = percentage;
+            param2 = " %";
           break;
 
           case 3:
           {
-              int8_t selectedSheetInt = drawDBData();
-              if (selectedSheetInt >= 0) {
-              selectedSheet = sheets[selectedSheetInt];
-              localCase = 4;
-              } else {
-              localCase = 0;
-              }
+            disableCore0WDT();
+            int8_t selectedSheetInt = drawDBData();
+            if (selectedSheetInt >= 0) {
+            selectedSheet = sheets[selectedSheetInt];
+            localCase = 4;
+            } else {
+            localCase = 0;
+            }
+            enableCore0WDT();
           }
           break;
               
           case 4:
           {
-              int8_t firstIngredient = drawFormula();
-              if (firstIngredient >= 0) {
-              selection = firstIngredient;
-              mainScreenScroll = true;
-              localCase = 2;
-              } else {
-              localCase = 0;
-              }
+            disableCore0WDT();
+            int8_t firstIngredient = drawFormula();
+            if (firstIngredient >= 0) {
+            selection = firstIngredient;
+            mainScreenScroll = true;
+            localCase = 2;
+            } else {
+            localCase = 0;
+            } 
+            enableCore0WDT();
           }
           break;
-          }
+        }
       if (inheritCase) {
           _message = ingredients[selection];
           _message.concat(" (");
@@ -1898,8 +1930,8 @@ void drawWeather(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen2, String symbol, St
 
 bool drawMainScreen(const char *s, bool scroll, String weight, String unit)
 {
-  int16_t offset = -(int16_t)u8g2.getDisplayWidth();
   int16_t len = strlen(s);
+  int16_t offset = - ((int16_t)len * 8);//(int16_t)u8g2.getDisplayWidth();
   if ((len * 8) > (int16_t)u8g2.getDisplayWidth() && scroll) {
     for (;;)
     {
@@ -1915,7 +1947,7 @@ bool drawMainScreen(const char *s, bool scroll, String weight, String unit)
       //    } while ( dataScreen.nextPage() );
       delay(5);
       offset += 2;
-      if ( offset > len * 8 + 1 )
+      if ( offset > len + 1 )
         break;
     }
   } else {
@@ -2035,7 +2067,7 @@ byte drawMenu(byte menuPlace) {
     if (menuPlace == 0) {
       menuPlace = menuMem;
       inMenu = false;
-      break;
+      return(menuPlace - 1);
     } else {
       uint8_t selectionSet = dataScreen.userInterfaceMessage(
                                "Selection:",
@@ -2047,7 +2079,7 @@ byte drawMenu(byte menuPlace) {
         inMenu = false;
         return(menuPlace - 1);
         break;
-      }
+      } 
     }
   } while ( dataScreen.nextPage() );
 }
