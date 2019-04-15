@@ -233,9 +233,9 @@ byte setCase;
 String operationMode = "single";
 bool inheritCase = false;
 
-#define BIT_CASE BIT0
-#define BIT_WIFI BIT1
-#define BIT_BLE BIT2
+#define BIT_CASE B00000000//BIT0
+#define BIT_WIFI B00000001//BIT1
+#define BIT_BLE B00000010//BIT2
 
 // Screen constructors
 #define SCREEN1_RES 19
@@ -582,12 +582,12 @@ void loop() {
   }
 
   int caseEventByte = xEventGroupGetBits(caseEventGroup);
-  if (caseEventByte != 0) {
-    if (bitRead(caseEventByte, BIT_CASE)) {
-      // xQueueReceive(queue, &sendQueue, 5); // should probably use a better wait & recieve scheme
-      // setCase = 
-      xQueueReceive(controlCase, &setCase, 0);
-    }
+  if (bitRead(caseEventByte, BIT_CASE)) {
+    Serial.print("flags: "); Serial.println(caseEventByte, BIN);
+    // xQueueReceive(queue, &sendQueue, 5); // should probably use a better wait & recieve scheme
+    // setCase = 
+    xQueueReceive(controlCase, &setCase, 10);
+
     if (bitRead(caseEventByte, BIT_WIFI)) {
       wifiOnOff = (wifiOnOff)?false:true;
     }
@@ -1770,11 +1770,14 @@ void displayManager (void * parameter)
         disableCore0WDT();
         localCase = drawMenu(localCase);
         enableCore0WDT();
-        if (localCase == 6) xEventGroupSetBits(caseEventGroup, BIT_WIFI);
-        if (localCase == 7) xEventGroupSetBits(caseEventGroup, BIT_BLE);
+        int caseEventByte = 0x00;
+        if (localCase == 6) caseEventByte |= (1 << BIT_WIFI);
+        if (localCase == 7) caseEventByte |= (1 << BIT_BLE);
         Serial.printf("setCase = %d\n", localCase);
         xQueueOverwrite(controlCase, &localCase);
-        xEventGroupSetBits(caseEventGroup, BIT0);
+        caseEventByte |= (1 << BIT_CASE);
+        Serial.print("send case bits: ");Serial.println(caseEventByte, BIN);
+        xEventGroupSetBits(caseEventGroup, caseEventByte);
       } else {
         operationMem = operationMode;
         avgWeight4Display = receiveQueue.mainMeasurement;
