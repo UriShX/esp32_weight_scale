@@ -54,6 +54,7 @@ void initBLE(bool onOff);
 void gotIP(system_event_id_t event);
 void lostCon(system_event_id_t event);
 void sendBLEdata(/*String _mode, */float _var1, float _var2);
+void wifiListenerLoop(void * parameter);
 bool scanWiFi();
 void connectWiFi();
 bool statusWIFI();
@@ -67,6 +68,7 @@ void readGoogleSheetTitles();
 void readGoogleSheet();
 void send2GoogleSheets();
 void buttonCheck(void *parameter);
+void menuManager (void *parameter);
 void displayManager(void * parameter);
 void drawScrollString(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen0, int16_t offset, const char *s);
 void drawHeader(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen1, const char *s);
@@ -89,11 +91,38 @@ void helpScreen();
 // FreeRTOS defines
 // ----------------------------
 TaskHandle_t displayTask;
+TaskHandle_t menuTask;
 TaskHandle_t buttonTask;
+TaskHandle_t wifiListenerTask;
 QueueHandle_t queue;
 QueueHandle_t controlCase;
 QueueHandle_t state;
 EventGroupHandle_t caseEventGroup;
+
+struct queueStruct {
+  float mainMeasurement;
+  float secMeasurement;
+  byte currentCase;
+};
+
+// struct for states
+struct stateStruct{
+    bool countSet = false;
+    bool keepCount = true;
+    bool tareNow = false;
+};
+
+byte setCase;
+
+#define BIT_CASE    B00000000//BIT0
+#define BIT_WIFI    B00000001//BIT1
+#define BIT_BLE     B00000010//BIT2
+#define BIT_MENU    B00000100//BIT3
+#define BIT_WIFI_ON B00001000//BIT4
+#define BIT_BLE_ON  B00010000//BIT5
+#define BIT_INHERIT B00100000//BIT6
+#define BIT_READY   B10000000//BIT7
+#define MASK_CASE B00001111
 
 // ----------------------------
 // Configurations
@@ -167,7 +196,7 @@ byte bleInitCounter = 0;
 bool deviceConnected = false; // BLE connection status
 
 bool wifiOnOff = false;
-bool wifiConnected = false;
+
 
 /** Buffer for JSON string */
 // MAx size is 51 bytes for frame:
@@ -194,6 +223,8 @@ const int doutPin = 18; //mcu > HX711 dout pin, must be external interrupt capab
 const int sckPin = 5; //mcu > HX711 sck pin
 //HX711 constructor:
 HX711_ADC scale(doutPin, sckPin);
+
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED; // Supposedly, help make external interrupts possible
 
 /** Google sheets connection setup **/
 String host = "script.google.com";
@@ -229,13 +260,8 @@ String inputString = "";         // a String to hold incoming data
 boolean stringComplete = false;  // whether the string is complete
 
 /** UI handlers **/
-byte setCase;
 String operationMode = "single";
 bool inheritCase = false;
-
-#define BIT_CASE B00000000//BIT0
-#define BIT_WIFI B00000001//BIT1
-#define BIT_BLE B00000010//BIT2
 
 // Screen constructors
 #define SCREEN1_RES 19
@@ -255,12 +281,6 @@ const char* menu_items[] = {
   "Get formulas",
   "Get ingredients",
   "Save measurements"
-};
-
-struct queueStruct {
-  float mainMeasurement;
-  float secMeasurement;
-  byte currentCase;
 };
 
 /** button assignment **/
@@ -283,12 +303,6 @@ long select_millis = millis();
 // Marker for menu
 bool inMenu = false;
 bool mainScreenScroll = false;
-// struct for states
-struct stateStruct{
-    bool countSet = false;
-    bool keepCount = true;
-    bool tareNow = false;
-};
 
 /** placeholders for measurements **/
 float keepWeight = 0.0f;
@@ -327,13 +341,24 @@ void setup() {
   }
 
   xTaskCreatePinnedToCore(
+    menuManager,
+    "menuTask",
+    2048,
+    NULL,
+    3,
+    &menuTask,
+    1
+  );
+  delay(500);
+
+  xTaskCreatePinnedToCore(
     displayManager,
     "displayTask",
     2048,
     NULL,
-    1,
+    2,
     &displayTask,
-    0);
+    1);
   delay(500);  // needed to start-up task1
 
   xTaskCreatePinnedToCore(
@@ -341,12 +366,22 @@ void setup() {
     "buttonTask",
     1024,
     NULL,
-    2,
+    3,
     &buttonTask,
-    0);
+    1);
   delay(500);  // needed to start-up task1
 
   caseEventGroup  = xEventGroupCreate();
+
+  xTaskCreatePinnedToCore(
+    wifiListenerLoop,
+    "wifiListenerTask",
+    10024,
+    NULL,
+    1,
+    &wifiListenerTask,
+    0);
+  delay(500);
 
   rtc_clk_cpu_freq_set(RTC_CPU_FREQ_80M); // Set SoC RTC to 80MHz, for HX711 communication
 
@@ -383,25 +418,25 @@ void setup() {
   }
   preferences.end();
 
-/*
-  Start BLE server
-   initBLE();
+  /*
+    Start BLE server
+    initBLE();
 
- if (hasCredentials) {
-   // Check for available AP's
-   if (!scanWiFi()) {
-     Serial.println("Could not find any AP");
-   } else {
-     // If AP was found, start connection
-     connectWiFi();
+  if (hasCredentials) {
+    // Check for available AP's
+    if (!scanWiFi()) {
+      Serial.println("Could not find any AP");
+    } else {
+      // If AP was found, start connection
+      connectWiFi();
 
-     bool isConnected = statusWIFI();
-     while (!isConnected) {
-       isConnected = statusWIFI();
-     }
-   }
- }
-*/
+      bool isConnected = statusWIFI();
+      while (!isConnected) {
+        isConnected = statusWIFI();
+      }
+    }
+  }
+  */
 
   delay(10);
 
@@ -409,10 +444,10 @@ void setup() {
   Serial.println("Initializing the scale");
   float calValue; // calibration value
   calValue = 481.815; // uncomment this if you want to set this value in the sketch
-#if defined(ESP8266)
-  //EEPROM.begin(sizeof calValue); // uncomment this if you use ESP8266 and want to fetch the value from eeprom
-#endif
-  //EEPROM.get(eepromAdress, calValue); // uncomment this if you want to fetch the value from eeprom
+  #if defined(ESP8266)
+    //EEPROM.begin(sizeof calValue); // uncomment this if you use ESP8266 and want to fetch the value from eeprom
+  #endif
+    //EEPROM.get(eepromAdress, calValue); // uncomment this if you want to fetch the value from eeprom
 
   scale.begin();
   int stabilisingtime = 2000; // tare preciscion can be improved by adding a few seconds of stabilising time
@@ -558,22 +593,17 @@ void loop() {
       }
     }
 
-/* 
+      /* 
        for (byte i = 0; i < inputString.length(); i++) {
          Serial.println(float(inputString[i]));
        }
        Serial.println(inputString);
-    clear the string:
-    
-*/
+      clear the string:
+      */
 
     inputString = "";
     stringComplete = false;
   }
-
-
-
-  
 
   //check if last tare operation is complete
   if (scale.getTareStatus() == true) {
@@ -581,20 +611,12 @@ void loop() {
     Serial.println(oldAvgWeight);
   }
 
-  int caseEventByte = xEventGroupGetBits(caseEventGroup);
+  int caseEventByte = xEventGroupGetBits(caseEventGroup); //not good, doesn't just get the bits, but clears all afterwards
+  // int caseEventByte = xEventGroupWaitBits(caseEventGroup, BIT_CASE, pdTRUE, pdTRUE, 0);
   if (bitRead(caseEventByte, BIT_CASE)) {
     Serial.print("flags: "); Serial.println(caseEventByte, BIN);
-    // xQueueReceive(queue, &sendQueue, 5); // should probably use a better wait & recieve scheme
-    // setCase = 
     xQueueReceive(controlCase, &setCase, 10);
-
-    if (bitRead(caseEventByte, BIT_WIFI)) {
-      wifiOnOff = (wifiOnOff)?false:true;
-    }
-    if (bitRead(caseEventByte, BIT_BLE)) {
-      bleOnOff = (bleOnOff)?false:true;
-    }
-    xEventGroupClearBits(caseEventGroup, 0xff);
+    xEventGroupClearBits(caseEventGroup, (1 << BIT_CASE));
   }
 
   switch (setCase) {
@@ -606,6 +628,10 @@ void loop() {
 
     case 1:
       scaleCount(sendState.countSet, sendState.keepCount);
+      if (sendState.countSet) {
+        sendState.countSet = false;
+        if (!sendState.keepCount) sendState.keepCount = true;
+      } 
       operationMode = "count";
       break;
 
@@ -616,12 +642,16 @@ void loop() {
         baseIngredient = false;
       }
       percentageCount(sendState.countSet, sendState.keepCount, sendState.tareNow);
+      if (sendState.countSet) {
+        sendState.countSet = false;
+        if (!sendState.keepCount) sendState.keepCount = true;
+      } 
       // operationMode = "percent";
       operationMode = (inheritCase) ? "formula%":"percentage";
       break;
 
     case 3:
-    Serial.printf("case:%d",memCase);
+      Serial.printf("case:%d\n",memCase);
       if (wifiOnOff) {
         if (sheets[0] != "") break;
         cli();//not implemented in esp32
@@ -640,7 +670,7 @@ void loop() {
       break;
 
     case 4:
-      if (wifiOnOff) {
+      if (statusWIFI()) {
         cli(); //not implemented in esp32
         scale.powerDown();             // put the ADC in sleep mode
         Serial.println("\nReading Google Spreadsheet data...");
@@ -662,7 +692,7 @@ void loop() {
       break;
 
     case 5:
-      if (wifiOnOff) {
+      if (statusWIFI()) {
         scale.powerDown();
         Serial.println("Saving measurements to Google Spreadsheet...");
         send2GoogleSheets();
@@ -676,127 +706,128 @@ void loop() {
       break;
 
     case 7:
-      //    noInterrupts();//portDISABLE_INTERRUPTS();//detachInterrupt(doutPin);//, ISR, FALLING);
-      cli();
+      // //    noInterrupts();//portDISABLE_INTERRUPTS();//detachInterrupt(doutPin);//, ISR, FALLING);
+      // cli();
 
-      if (bleOnOff && !bleConnected) {
-/*        esp_bt_controller_enable(ESP_BT_MODE_BTDM);
-             btStart();
-             while (!btStarted());
-        Start BLE server
-       if (bleInitCounter == 0) {
-*/
-          initBLE(true);
-/*        } else {
-          btStart();
-         esp_bt_controller_enable(ESP_BT_MODE_BLE);
-         delay(100);
-         btStart();
-         esp_bt_controller_init();
-       }
-*/
-        do {
-          bleConnected = esp_bt_controller_get_status();
-        } while (!bleConnected);
-/*
-       bleInitCounter++;
-       Serial.println(bleInitCounter);
-*/
-        Serial.printf("\n\ndisabling BLE will result in restarting the scale atm. Sorry!\n\n");
-//        Serial.printf("ble stat: %d\n", bleConnected);
-      } else if (!bleOnOff && bleConnected) {
-        
-        ESP.restart();
-/*
-             esp_bluedroid_disable();
-             esp_bluedroid_deinit();
-       initBLE(false);
-       delay(100);
-       if (esp_bt_controller_disable() != 0) {
-         Serial.println("could not disable BLE");
-       } else {
-         bleConnected = false;
-       }
-       delay(100);
-       esp_bt_controller_deinit();
-       delay(100);
-       esp_bt_controller_mem_release(ESP_BT_MODE_BLE);// uncommented in BLEDevice.cpp
-       btStop(); // Turn off bluetooth for saving battery
-       delay(100);
-       bleConnected = false;
-       do {
-         byte getBLEStat = esp_bt_controller_get_status();//BLEDevice::getInitialized();
-         Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", getBLEStat, BLEDevice::getInitialized());
-         if (getBLEStat == 2) bleConnected = false;
-//          bleConnected = 
-         delay(250);
-       } while (bleConnected);
-*/
-      }
-      Serial.printf("ble stat: %d\n", bleConnected);
-      Serial.println(ESP.getFreeHeap());
+      // if (bleOnOff && !bleConnected) {
+      // /*esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+      //        btStart();
+      //        while (!btStarted());
+      //   Start BLE server
+      //  if (bleInitCounter == 0) {
+      //   */
+      // initBLE(true);
+      // /*} else {
+      //     btStart();
+      //    esp_bt_controller_enable(ESP_BT_MODE_BLE);
+      //    delay(100);
+      //    btStart();
+      //    esp_bt_controller_init();
+      //  }
+      // */
+      // do {
+      //   bleConnected = esp_bt_controller_get_status();
+      // } while (!bleConnected);
+      // /*
+      //  bleInitCounter++;
+      //  Serial.println(bleInitCounter);
+      // */
+      // Serial.printf("\n\ndisabling BLE will result in restarting the scale atm. Sorry!\n\n");
+      // //  Serial.printf("ble stat: %d\n", bleConnected);
+      // } else if (!bleOnOff && bleConnected) {
+      //   ESP.restart();
+      //   /*
+      //     esp_bluedroid_disable();
+      //     esp_bluedroid_deinit();
+      //     initBLE(false);
+      //     delay(100);
+      //     if (esp_bt_controller_disable() != 0) {
+      //       Serial.println("could not disable BLE");
+      //     } else {
+      //       bleConnected = false;
+      //     }
+      //     delay(100);
+      //     esp_bt_controller_deinit();
+      //     delay(100);
+      //     esp_bt_controller_mem_release(ESP_BT_MODE_BLE);// uncommented in BLEDevice.cpp
+      //     btStop(); // Turn off bluetooth for saving battery
+      //     delay(100);
+      //     bleConnected = false;
+      //     do {
+      //       byte getBLEStat = esp_bt_controller_get_status();//BLEDevice::getInitialized();
+      //       Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", getBLEStat, BLEDevice::getInitialized());
+      //       if (getBLEStat == 2) bleConnected = false;
+      //       //  bleConnected = 
+      //       delay(250);
+      //     } while (bleConnected);
+      //   */
+      // }
+      // Serial.printf("ble stat: %d\n", bleConnected);
+      // Serial.println(ESP.getFreeHeap());
       setCase = memCase;
-      //    interrupts();//portENABLE_INTERRUPTS();//attachInterrupt(doutPin, ISR, FALLING);
-      sei();
+      // //    interrupts();//portENABLE_INTERRUPTS();//attachInterrupt(doutPin, ISR, FALLING);
+      // sei();
 
       break;
 
-      case 6:
+    case 6:
       // cli();
-      detachInterrupt(doutPin);//, ISR, FALLING);
-      Serial.printf("wifiOnOff: %d, wifiConnected: %d\n", wifiOnOff, wifiConnected);
-      if (wifiOnOff && !wifiConnected) {
-        Serial.println("turning wifi on");
-        if (hasCredentials) {
-          bool scanResult;
-          byte scanTrials = 0;
-          // Check for available AP's
-          do {
-            String noAPMessage = "Could not find any AP";
-            String noAPTryAgain = ", trying again";
-            scanResult = scanWiFi();
-            if (!scanResult) {
-              scanTrials++;
-              if (scanTrials < 4) noAPMessage.concat(noAPTryAgain);
-              Serial.println(noAPMessage);
-            }
-          } while(!scanResult && scanTrials < 4);
+      // detachInterrupt(doutPin);//, ISR, FALLING);
+      // Serial.printf("wifiOnOff: %d, wifiConnected: %d\n", wifiOnOff, wifiConnected);
+      // if (wifiOnOff && !wifiConnected) {
+      //   Serial.println("turning wifi on");
+      //   if (hasCredentials) {
+      //     bool scanResult;
+      //     byte scanTrials = 0;
+      //     // Check for available AP's
+      //     do {
+      //       String noAPMessage = "Could not find any AP";
+      //       String noAPTryAgain = ", trying again";
+      //       scanResult = scanWiFi();
+      //       if (!scanResult) {
+      //         scanTrials++;
+      //         if (scanTrials < 4) noAPMessage.concat(noAPTryAgain);
+      //         Serial.println(noAPMessage);
+      //       }
+      //     } while(!scanResult && scanTrials < 4);
           
-          if (scanResult) {
-            // If AP was found, start connection
-            connectWiFi();
+      //     if (scanResult) {
+      //       // If AP was found, start connection
+      //       connectWiFi();
       
-            bool isConnected = statusWIFI();
-            while (!isConnected) {
-              isConnected = statusWIFI();
-            }
-            wifiConnected = statusWIFI();
-          } else {
-            WiFi.disconnect(true);
-            wifiOnOff = false;
-          }
-        }
-      } else if (!wifiOnOff && wifiConnected) {
-        Serial.println("turning wifi off");
-        WiFi.disconnect(true);
-/*
-        esp_wifi_disconnect();
-        delay(100);
-        esp_wifi_stop();
-        delay(100);
-        esp_wifi_deinit();
-        delay(100);
-*/
-        do {
-          wifiConnected = statusWIFI();
-        } while (wifiConnected);
-      }
-      Serial.println(ESP.getFreeHeap());
+      //       bool isConnected = statusWIFI();
+      //       while (!isConnected) {
+      //         isConnected = statusWIFI();
+      //       }
+      //       wifiConnected = statusWIFI();
+      //     } else {
+      //       WiFi.disconnect(true);
+      //       wifiOnOff = false;
+      //     }
+      //   }
+      // } else if (!wifiOnOff && wifiConnected) {
+      //   Serial.println("turning wifi off");
+      //   WiFi.disconnect(true);
+      // /*
+      //   esp_wifi_disconnect();
+      //   delay(100);
+      //   esp_wifi_stop();
+      //   delay(100);
+      //   esp_wifi_deinit();
+      //   delay(100);
+      // */
+      //   do {
+      //     wifiConnected = statusWIFI();
+      //   } while (wifiConnected);
+      // }
+      // Serial.println(ESP.getFreeHeap());
       setCase = memCase;
       // sei();
-      attachInterrupt(doutPin, ISR, FALLING);
+      // attachInterrupt(doutPin, ISR, FALLING);
       break;
   }
+  
+  xQueueSend(state, &sendState, 0);
 
   /** WiFi connection checker (keep alive function) **/
   if (wifiOnOff) {
@@ -1075,6 +1106,141 @@ void sendBLEdata(/*String _mode, */float _var1, float _var2) {
       setCase = 0;
       Serial.print("notify failed, value of 0x2902 descriptor:\t");
       Serial.println(testNotify, HEX);//*pCharacteristicMeas->getDescriptorByUUID((uint16_t)0x2902)->getValue(), HEX);
+    }
+  }
+}
+
+void wifiListenerLoop(void * parameter)
+{
+  byte bitsForWifiOrBle = (BIT_WIFI | BIT_BLE) << 1;
+
+  while(1) {
+    int bleOrWifi = xEventGroupWaitBits(caseEventGroup, bitsForWifiOrBle, pdTRUE, pdFALSE, portMAX_DELAY);
+    Serial.print("recieved:\t");Serial.println(bleOrWifi, BIN);
+
+    if (bitRead(bleOrWifi, BIT_WIFI)) {
+      // detachInterrupt(doutPin);//, ISR, FALLING);
+      Serial.printf("wifiOnOff: %d, wifiConnected: %d\n", statusWIFI());
+      if (!statusWIFI()) {
+        Serial.println("turning wifi on");
+        if (hasCredentials) {
+          bool scanResult;
+          byte scanTrials = 0;
+          // Check for available AP's
+          do {
+            String noAPMessage = "Could not find any AP";
+            String noAPTryAgain = ", trying again";
+            detachInterrupt(doutPin);
+            vTaskDelay(1);
+            scanResult = scanWiFi(); 
+            attachInterrupt(doutPin, ISR, FALLING);         
+            if (!scanResult) {
+              scanTrials++;
+              if (scanTrials < 4) noAPMessage.concat(noAPTryAgain);
+              Serial.println(noAPMessage);
+            }
+          } while(!scanResult && scanTrials < 4);
+          
+          if (scanResult) {
+            // If AP was found, start connection
+            detachInterrupt(doutPin);
+            vTaskDelay(1);
+            connectWiFi();
+            attachInterrupt(doutPin, ISR, FALLING);
+      
+            bool isConnected = statusWIFI();
+            while (!isConnected) {
+              isConnected = statusWIFI();
+            }
+            // wifiConnected = statusWIFI();
+          } else {
+            WiFi.disconnect(true);
+
+            // wifiOnOff = false;
+          }
+        }
+      } else if (statusWIFI()) {
+        Serial.println("turning wifi off");
+        WiFi.disconnect(true);
+      /*
+        esp_wifi_disconnect();
+        delay(100);
+        esp_wifi_stop();
+        delay(100);
+        esp_wifi_deinit();
+        delay(100);
+      */
+        // do {
+        //   wifiConnected = statusWIFI();
+        // } while (wifiConnected);
+      }
+      Serial.println(ESP.getFreeHeap());
+      // setCase = memCase;
+      // sei();
+      // attachInterrupt(doutPin, ISR, FALLING);
+    }
+    else if (bitRead(bleOrWifi, BIT_BLE)) {
+      //    noInterrupts();//portDISABLE_INTERRUPTS();//detachInterrupt(doutPin);//, ISR, FALLING);
+      cli();
+
+      if (bleOnOff && !bleConnected) {
+      /*esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+             btStart();
+             while (!btStarted());
+        Start BLE server
+       if (bleInitCounter == 0) {
+        */
+      initBLE(true);
+      /*} else {
+          btStart();
+         esp_bt_controller_enable(ESP_BT_MODE_BLE);
+         delay(100);
+         btStart();
+         esp_bt_controller_init();
+       }
+      */
+      do {
+        bleConnected = esp_bt_controller_get_status();
+      } while (!bleConnected);
+      /*
+       bleInitCounter++;
+       Serial.println(bleInitCounter);
+      */
+      Serial.printf("\n\ndisabling BLE will result in restarting the scale atm. Sorry!\n\n");
+      //  Serial.printf("ble stat: %d\n", bleConnected);
+      } else if (!bleOnOff && bleConnected) {
+        ESP.restart();
+        /*
+          esp_bluedroid_disable();
+          esp_bluedroid_deinit();
+          initBLE(false);
+          delay(100);
+          if (esp_bt_controller_disable() != 0) {
+            Serial.println("could not disable BLE");
+          } else {
+            bleConnected = false;
+          }
+          delay(100);
+          esp_bt_controller_deinit();
+          delay(100);
+          esp_bt_controller_mem_release(ESP_BT_MODE_BLE);// uncommented in BLEDevice.cpp
+          btStop(); // Turn off bluetooth for saving battery
+          delay(100);
+          bleConnected = false;
+          do {
+            byte getBLEStat = esp_bt_controller_get_status();//BLEDevice::getInitialized();
+            Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", getBLEStat, BLEDevice::getInitialized());
+            if (getBLEStat == 2) bleConnected = false;
+            //  bleConnected = 
+            delay(250);
+          } while (bleConnected);
+        */
+      }
+      Serial.printf("ble stat: %d\n", bleConnected);
+      Serial.println(ESP.getFreeHeap());
+      // setCase = memCase;
+      //    interrupts();//portENABLE_INTERRUPTS();//attachInterrupt(doutPin, ISR, FALLING);
+      sei();
     }
   }
 }
@@ -1711,13 +1877,13 @@ void buttonCheck(void *parameter)
           sendState.tareNow = true;
         } 
       }
-  /*
+    /*
         if (!digitalRead(DOWN_BUT)) {
           menuPlace = (menuPlace == (NUM_MENU_ITEMS - 1)) ? 0 : (menuPlace + 1);
           down_set = false;
           Serial.println(menuPlace);
         }
-  */
+    */
     }
 
     if ( button_event > 0 )  // all known events are processed, clear event
@@ -1729,6 +1895,14 @@ void buttonCheck(void *parameter)
     // not quite sure why the delay is needed, it's only here so wdt gets something?
     // perhaps only an Arduino thing?
     // see https://github.com/espressif/arduino-esp32/issues/595
+  }
+}
+
+void menuManager (void *parameter)
+{
+
+  while(1) {
+    xEventGroupWaitBits(caseEventGroup, (1 << BIT_MENU), pdTRUE, pdTRUE, portMAX_DELAY);
   }
 }
 
@@ -1765,20 +1939,26 @@ void displayManager (void * parameter)
   while (1) {
     xQueueReceive(queue, &receiveQueue, 100);
     byte localCase = receiveQueue.currentCase;
-    if (operationMem != operationMode || avgWeight4Display != receiveQueue.mainMeasurement) {
-      if (inMenu) {// set watch point?
-        disableCore0WDT();
+    if (inMenu) {// set watch point?
+        // disableCore0WDT();
         localCase = drawMenu(localCase);
-        enableCore0WDT();
-        int caseEventByte = 0x00;
-        if (localCase == 6) caseEventByte |= (1 << BIT_WIFI);
-        if (localCase == 7) caseEventByte |= (1 << BIT_BLE);
         Serial.printf("setCase = %d\n", localCase);
-        xQueueOverwrite(controlCase, &localCase);
-        caseEventByte |= (1 << BIT_CASE);
+        // enableCore0WDT();
+        int caseEventByte = 0x00;
+        // if (localCase == 0);
+        if (localCase == 6) caseEventByte |= (1 << BIT_WIFI);
+        else if (localCase == 7) caseEventByte |= (1 << BIT_BLE);
+        else {
+          xQueueOverwrite(controlCase, &localCase);
+          caseEventByte |= (1 << BIT_CASE);
+        }
+        // bitClear(caseEventByte, BIT_MENU);
         Serial.print("send case bits: ");Serial.println(caseEventByte, BIN);
         xEventGroupSetBits(caseEventGroup, caseEventByte);
-      } else {
+    }
+    else if (operationMem != operationMode || avgWeight4Display != receiveQueue.mainMeasurement) {
+      
+      // } else {
         operationMem = operationMode;
         avgWeight4Display = receiveQueue.mainMeasurement;
         String _messageInfo = "mode: ";
@@ -1808,7 +1988,7 @@ void displayManager (void * parameter)
 
           case 3:
           {
-            disableCore0WDT();
+            // disableCore0WDT();
             int8_t selectedSheetInt = drawDBData();
             if (selectedSheetInt >= 0) {
             selectedSheet = sheets[selectedSheetInt];
@@ -1816,13 +1996,13 @@ void displayManager (void * parameter)
             } else {
             localCase = 0;
             }
-            enableCore0WDT();
+            // enableCore0WDT();
           }
           break;
               
           case 4:
           {
-            disableCore0WDT();
+            // disableCore0WDT();
             int8_t firstIngredient = drawFormula();
             if (firstIngredient >= 0) {
             selection = firstIngredient;
@@ -1831,7 +2011,7 @@ void displayManager (void * parameter)
             } else {
             localCase = 0;
             } 
-            enableCore0WDT();
+            // enableCore0WDT();
           }
           break;
         }
@@ -1849,9 +2029,9 @@ void displayManager (void * parameter)
       drawInfoScreen(message1, var1, param1);
       // else {
           // setCase = drawMenu(setCase);
-      }
+      // }
     }
-    vTaskDelay(10);
+    vTaskDelay(20);
     // not quite sure why the delay is needed, it's only here so wdt gets something?
     // perhaps only an Arduino thing?
     // see https://github.com/espressif/arduino-esp32/issues/595
@@ -1908,6 +2088,7 @@ void drawHeader(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen1, const char *s) {
 void drawIcons(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen) {
   screen.setFont(u8g2_font_open_iconic_embedded_1x_t);
   byte iconWidth = screen.getMaxCharWidth();//8;
+  bool wifiConnected = statusWIFI();
   if (wifiConnected) {
     byte wifiPlace = screen.getDisplayWidth() - iconWidth;
     screen.drawGlyph(wifiPlace, 13, 80);
@@ -2054,7 +2235,7 @@ byte drawMenu(byte menuPlace) {
     if (i != 0) _menu.concat("\n");
     _menu.concat(menu_items[i]);
   }
-  if (!wifiOnOff) _menu.concat("\nturn WiFi on\n");
+  if (!statusWIFI()) _menu.concat("\nturn WiFi on\n");
   else _menu.concat("\nturn WiFi off\n");
   if (!bleOnOff) _menu.concat("turn BLE on");
   else _menu.concat("turn BLE off (reset)");
