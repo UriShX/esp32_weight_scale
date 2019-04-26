@@ -69,6 +69,7 @@ void readGoogleSheet();
 void send2GoogleSheets();
 void buttonCheck(void *parameter);
 void menuManager (void *parameter);
+void sheetSelectionMenu (void *parameter);
 void displayManager(void * parameter);
 void drawScrollString(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen0, int16_t offset, const char *s);
 void drawHeader(U8G2_SSD1306_128X64_NONAME_2_HW_I2C &screen1, const char *s);
@@ -92,8 +93,10 @@ void helpScreen();
 // ----------------------------
 TaskHandle_t displayTask;
 TaskHandle_t menuTask;
+TaskHandle_t sheetsTask;
 TaskHandle_t buttonTask;
 TaskHandle_t wifiListenerTask;
+SemaphoreHandle_t caseChangeSemaphore;
 QueueHandle_t queue;
 QueueHandle_t controlCase;
 QueueHandle_t state;
@@ -114,11 +117,11 @@ struct stateStruct{
 
 byte setCase;
 
-#define BIT_CASE    B00000000//BIT0
-#define BIT_WIFI    B00000001//BIT1
-#define BIT_BLE     B00000010//BIT2
-#define BIT_MENU    B00000100//BIT3
-#define BIT_WIFI_ON B00001000//BIT4
+#define BIT_WIFI    B00000000//BIT0
+#define BIT_BLE     B00000001//BIT1
+#define BIT_GET_S   B00000010//BIT2
+#define BIT_GET_F   B00000100//BIT3
+#define BIT_MENU    B00001000//BIT4
 #define BIT_BLE_ON  B00010000//BIT5
 #define BIT_INHERIT B00100000//BIT6
 #define BIT_READY   B10000000//BIT7
@@ -322,6 +325,18 @@ RTC_DATA_ATTR int bootCount = 0; // Store boot count
 void setup() {
   Serial.begin(115200); // Start serial communication
 
+  caseChangeSemaphore = xSemaphoreCreateBinary();
+
+  if(caseChangeSemaphore == NULL){
+    Serial.println("Error creating caseChangeSemaphore");
+  }
+
+  caseEventGroup  = xEventGroupCreate();
+
+  if(caseEventGroup == NULL){
+    Serial.println("Error creating caseEventGroup");
+  }
+
   queue = xQueueCreate(2, sizeof(struct queueStruct));
   
   if(queue == NULL){
@@ -352,6 +367,17 @@ void setup() {
   delay(500);
 
   xTaskCreatePinnedToCore(
+    sheetSelectionMenu,
+    "sheetsTask",
+    2048,
+    NULL,
+    3,
+    &sheetsTask,
+    1
+  );
+  delay(500);
+
+  xTaskCreatePinnedToCore(
     displayManager,
     "displayTask",
     2048,
@@ -370,8 +396,6 @@ void setup() {
     &buttonTask,
     1);
   delay(500);  // needed to start-up task1
-
-  caseEventGroup  = xEventGroupCreate();
 
   xTaskCreatePinnedToCore(
     wifiListenerLoop,
@@ -611,12 +635,13 @@ void loop() {
     Serial.println(oldAvgWeight);
   }
 
-  int caseEventByte = xEventGroupGetBits(caseEventGroup); //not good, doesn't just get the bits, but clears all afterwards
+  // int caseEventByte = xEventGroupGetBits(caseEventGroup); //not good, doesn't just get the bits, but clears all afterwards
   // int caseEventByte = xEventGroupWaitBits(caseEventGroup, BIT_CASE, pdTRUE, pdTRUE, 0);
-  if (bitRead(caseEventByte, BIT_CASE)) {
-    Serial.print("flags: "); Serial.println(caseEventByte, BIN);
+  // if (bitRead(caseEventByte, BIT_CASE)) {
+  if (xSemaphoreTake(caseChangeSemaphore, 0) == pdTRUE) {
+    // Serial.print("flags: "); Serial.println(caseEventByte, BIN);
     xQueueReceive(controlCase, &setCase, 10);
-    xEventGroupClearBits(caseEventGroup, (1 << BIT_CASE));
+    // xEventGroupClearBits(caseEventGroup, (1 << BIT_CASE));
   }
 
   switch (setCase) {
@@ -652,7 +677,7 @@ void loop() {
 
     case 3:
       Serial.printf("case:%d\n",memCase);
-      if (wifiOnOff) {
+      if (statusWIFI()) {
         if (sheets[0] != "") break;
         cli();//not implemented in esp32
         scale.powerDown();             // put the ADC in sleep mode
@@ -661,6 +686,7 @@ void loop() {
         readGoogleSheetTitles();
         scale.powerUp();
         sei();//not implemented in esp32
+        xEventGroupSetBits(caseEventGroup, (1 << BIT_GET_S));
       } else {
         Serial.println("connect to WiFi (type 'wifi' in terminal) to complete this task");
         
@@ -684,6 +710,7 @@ void loop() {
         Serial.println("a list of remaining ingredients will then be displayed, choose the next ingredient, and so on.");
         inheritCase = true;
         setCase = 2;//memCase;
+        xEventGroupSetBits(caseEventGroup, (1 << BIT_GET_F));
       } else {
         Serial.println("connect to WiFi (type 'wifi' in terminal) to complete this task");
         setCase = memCase;
@@ -1898,6 +1925,38 @@ void buttonCheck(void *parameter)
   }
 }
 
+void sheetSelectionMenu (void *parameter)
+{
+  byte bitsForFormulaSelection = (BIT_GET_S | BIT_GET_F) << 1;
+
+  while(1) {
+    int sheetOrFormula = xEventGroupWaitBits(caseEventGroup, bitsForFormulaSelection, pdTRUE, pdFALSE, portMAX_DELAY);
+    byte _case = 0;
+    if (bitRead(sheetOrFormula, BIT_GET_S))
+    {
+      int8_t selectedSheetInt = drawDBData();
+      if (selectedSheetInt >= 0) {
+      selectedSheet = sheets[selectedSheetInt];
+      _case = 4;
+      xQueueOverwrite(controlCase, &_case);
+      xSemaphoreGive(caseChangeSemaphore);
+      }
+    }
+        
+    if (bitRead(sheetOrFormula, BIT_GET_F))
+    {
+      int8_t firstIngredient = drawFormula();
+      if (firstIngredient >= 0) {
+      selection = firstIngredient;
+      mainScreenScroll = true;
+      _case = 2;
+      xQueueOverwrite(controlCase, &_case);
+      xSemaphoreGive(caseChangeSemaphore);
+      }
+    }
+  }
+}
+
 void menuManager (void *parameter)
 {
 
@@ -1950,15 +2009,14 @@ void displayManager (void * parameter)
         else if (localCase == 7) caseEventByte |= (1 << BIT_BLE);
         else {
           xQueueOverwrite(controlCase, &localCase);
-          caseEventByte |= (1 << BIT_CASE);
+          // caseEventByte |= (1 << BIT_CASE);
+          xSemaphoreGive(caseChangeSemaphore);
         }
         // bitClear(caseEventByte, BIT_MENU);
         Serial.print("send case bits: ");Serial.println(caseEventByte, BIN);
         xEventGroupSetBits(caseEventGroup, caseEventByte);
     }
     else if (operationMem != operationMode || avgWeight4Display != receiveQueue.mainMeasurement) {
-      
-      // } else {
         operationMem = operationMode;
         avgWeight4Display = receiveQueue.mainMeasurement;
         String _messageInfo = "mode: ";
@@ -1984,35 +2042,6 @@ void displayManager (void * parameter)
           case 2:
             var2 = percentage;
             param2 = " %";
-          break;
-
-          case 3:
-          {
-            // disableCore0WDT();
-            int8_t selectedSheetInt = drawDBData();
-            if (selectedSheetInt >= 0) {
-            selectedSheet = sheets[selectedSheetInt];
-            localCase = 4;
-            } else {
-            localCase = 0;
-            }
-            // enableCore0WDT();
-          }
-          break;
-              
-          case 4:
-          {
-            // disableCore0WDT();
-            int8_t firstIngredient = drawFormula();
-            if (firstIngredient >= 0) {
-            selection = firstIngredient;
-            mainScreenScroll = true;
-            localCase = 2;
-            } else {
-            localCase = 0;
-            } 
-            // enableCore0WDT();
-          }
           break;
         }
       if (inheritCase) {
