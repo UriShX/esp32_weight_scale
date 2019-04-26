@@ -1139,7 +1139,7 @@ void sendBLEdata(/*String _mode, */float _var1, float _var2) {
 
 void wifiListenerLoop(void * parameter)
 {
-  byte bitsForWifiOrBle = (BIT_WIFI | BIT_BLE) << 1;
+  byte bitsForWifiOrBle = (1 << BIT_WIFI | 1 << BIT_BLE);
 
   while(1) {
     int bleOrWifi = xEventGroupWaitBits(caseEventGroup, bitsForWifiOrBle, pdTRUE, pdFALSE, portMAX_DELAY);
@@ -1927,7 +1927,7 @@ void buttonCheck(void *parameter)
 
 void sheetSelectionMenu (void *parameter)
 {
-  byte bitsForFormulaSelection = (BIT_GET_S | BIT_GET_F) << 1;
+  byte bitsForFormulaSelection = (1 << BIT_GET_S | 1 << BIT_GET_F);
 
   while(1) {
     int sheetOrFormula = xEventGroupWaitBits(caseEventGroup, bitsForFormulaSelection, pdTRUE, pdFALSE, portMAX_DELAY);
