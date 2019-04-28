@@ -97,6 +97,7 @@ TaskHandle_t sheetsTask;
 TaskHandle_t buttonTask;
 TaskHandle_t wifiListenerTask;
 SemaphoreHandle_t caseChangeSemaphore;
+SemaphoreHandle_t cacheAvailableForInterrupt;
 QueueHandle_t queue;
 QueueHandle_t controlCase;
 QueueHandle_t state;
@@ -335,6 +336,12 @@ void setup() {
 
   if(caseEventGroup == NULL){
     Serial.println("Error creating caseEventGroup");
+  }
+
+  cacheAvailableForInterrupt = xSemaphoreCreateMutex();
+  
+  if(cacheAvailableForInterrupt == NULL){
+    Serial.println("Error creating cacheAvailableForInterrupt");
   }
 
   queue = xQueueCreate(2, sizeof(struct queueStruct));
@@ -1067,6 +1074,10 @@ void initBLE(bool onOff) {
   } else if (!onOff) {
     pAdvertising->stop();
     pService->stop();
+    // in BLEDevice.cpp: void BLEDevice::deinit(bool release_memory)
+    // detachInterrupt(doutPin);
+    BLEDevice::deinit(true);
+    // attachInterrupt(doutPin, ISR, FALLING);
   }
 }
 
@@ -1157,10 +1168,14 @@ void wifiListenerLoop(void * parameter)
           do {
             String noAPMessage = "Could not find any AP";
             String noAPTryAgain = ", trying again";
-            detachInterrupt(doutPin);
-            vTaskDelay(pdMS_TO_TICKS(1));
+            // detachInterrupt(doutPin);
+            // vTaskDelay(pdMS_TO_TICKS(1));
+            do {
+              vTaskDelay(20);
+            } while (xSemaphoreTake(cacheAvailableForInterrupt,0) != pdPASS);
             scanResult = scanWiFi(); 
-            attachInterrupt(doutPin, ISR, FALLING);         
+            xSemaphoreGive(cacheAvailableForInterrupt);
+            // attachInterrupt(doutPin, ISR, FALLING);         
             if (!scanResult) {
               scanTrials++;
               if (scanTrials < 4) noAPMessage.concat(noAPTryAgain);
@@ -1170,10 +1185,14 @@ void wifiListenerLoop(void * parameter)
           
           if (scanResult) {
             // If AP was found, start connection
-            detachInterrupt(doutPin);
-            vTaskDelay(pdMS_TO_TICKS(1));
+            // detachInterrupt(doutPin);
+            // vTaskDelay(pdMS_TO_TICKS(1));
+            do {
+              vTaskDelay(20);
+            } while (xSemaphoreTake(cacheAvailableForInterrupt,0) != pdPASS);
             connectWiFi();
-            attachInterrupt(doutPin, ISR, FALLING);
+            xSemaphoreGive(cacheAvailableForInterrupt);
+            // attachInterrupt(doutPin, ISR, FALLING);
       
             bool isConnected = statusWIFI();
             while (!isConnected) {
@@ -1189,54 +1208,23 @@ void wifiListenerLoop(void * parameter)
       } else if (statusWIFI()) {
         Serial.println("turning wifi off");
         WiFi.disconnect(true);
-      /*
-        esp_wifi_disconnect();
-        delay(100);
-        esp_wifi_stop();
-        delay(100);
-        esp_wifi_deinit();
-        delay(100);
-      */
-        // do {
-        //   wifiConnected = statusWIFI();
-        // } while (wifiConnected);
       }
       Serial.println(ESP.getFreeHeap());
-      // setCase = memCase;
-      // sei();
-      // attachInterrupt(doutPin, ISR, FALLING);
     }
     else if (bitRead(bleOrWifi, BIT_BLE)) {
-      //    noInterrupts();//portDISABLE_INTERRUPTS();//detachInterrupt(doutPin);//, ISR, FALLING);
-      cli();
-
       /* see definition in
-      * ~/.arduino15/packages/esp32/hardware/esp32/1.0.1/tools/sdk/include/bt/esp_bt.h:
-      * typedef enum {
-      *     ESP_BT_CONTROLLER_STATUS_IDLE = 0,
-      *     ESP_BT_CONTROLLER_STATUS_INITED,
-      *     ESP_BT_CONTROLLER_STATUS_ENABLED,
-      *     ESP_BT_CONTROLLER_STATUS_NUM,
-      * } esp_bt_controller_status_t; 
-      * 
-      * c lang default is to assign typedef enums ascending numbers, ie 0, 1, 2...
+       ~/.arduino15/packages/esp32/hardware/esp32/1.0.1/tools/sdk/include/bt/esp_bt.h:
+       typedef enum {
+           ESP_BT_CONTROLLER_STATUS_IDLE = 0,
+           ESP_BT_CONTROLLER_STATUS_INITED,
+           ESP_BT_CONTROLLER_STATUS_ENABLED,
+           ESP_BT_CONTROLLER_STATUS_NUM,
+       } esp_bt_controller_status_t; 
+       
+       c lang default is to assign typedef enums ascending numbers, ie 0, 1, 2...
       */
       if (!(bleConnected == 2)) {
-      /*esp_bt_controller_enable(ESP_BT_MODE_BTDM);
-             btStart();
-             while (!btStarted());
-        Start BLE server
-       if (bleInitCounter == 0) {
-        */
       initBLE(true);
-      /*} else {
-          btStart();
-         esp_bt_controller_enable(ESP_BT_MODE_BLE);
-         delay(100);
-         btStart();
-         esp_bt_controller_init();
-       }
-      */
       do {
         bleConnected = esp_bt_controller_get_status();
       } while (!(bleConnected == 2));
@@ -1244,41 +1232,24 @@ void wifiListenerLoop(void * parameter)
        bleInitCounter++;
        Serial.println(bleInitCounter);
       */
-      Serial.printf("\n\ndisabling BLE will result in restarting the scale atm. Sorry!\n\n");
-      //  Serial.printf("ble stat: %d\n", bleConnected);
+       Serial.printf("ble stat: %d\n", bleConnected);
       } else if (bleConnected) {
-        ESP.restart();
-        /*
-          esp_bluedroid_disable();
-          esp_bluedroid_deinit();
-          initBLE(false);
-          delay(100);
-          if (esp_bt_controller_disable() != 0) {
-            Serial.println("could not disable BLE");
-          } else {
-            bleConnected = false;
-          }
-          delay(100);
-          esp_bt_controller_deinit();
-          delay(100);
-          esp_bt_controller_mem_release(ESP_BT_MODE_BLE);// uncommented in BLEDevice.cpp
-          btStop(); // Turn off bluetooth for saving battery
-          delay(100);
+        initBLE(false);
+        delay(100);
+        if (esp_bt_controller_disable() != 0) {
+          Serial.println("could not disable BLE");
+        } else {
           bleConnected = false;
-          do {
-            byte getBLEStat = esp_bt_controller_get_status();//BLEDevice::getInitialized();
-            Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", getBLEStat, BLEDevice::getInitialized());
-            if (getBLEStat == 2) bleConnected = false;
-            //  bleConnected = 
-            delay(250);
-          } while (bleConnected);
-        */
+        }
+        delay(100);
+        do {
+          bleConnected = esp_bt_controller_get_status();//BLEDevice::getInitialized();
+          Serial.printf("ble stat reply: %d, bleDevice lib init: %d\n", bleConnected, BLEDevice::getInitialized());
+          delay(250);
+        } while (bleConnected);
       }
       Serial.printf("ble stat: %d\n", bleConnected);
       Serial.println(ESP.getFreeHeap());
-      // setCase = memCase;
-      //    interrupts();//portENABLE_INTERRUPTS();//attachInterrupt(doutPin, ISR, FALLING);
-      sei();
     }
   }
 }
@@ -1394,7 +1365,14 @@ bool statusWIFI() {
 //IRAM_ATTR tells the complier, that this code Must always be in the 
 // ESP32's IRAM, the limited 128k IRAM.  use it sparingly.
 void IRAM_ATTR ISR() {
-  scale.update();
+  if (xSemaphoreTake(cacheAvailableForInterrupt, 0) == pdPASS) {
+    if (spi_flash_cache_enabled()) {  
+      portENTER_CRITICAL_ISR(&mux);
+      scale.update();
+      portEXIT_CRITICAL_ISR(&mux);  
+    }
+    xSemaphoreGive(cacheAvailableForInterrupt);
+  }
 }
 
 // Get scale reading
