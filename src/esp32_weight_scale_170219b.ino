@@ -194,7 +194,7 @@ BLEService *pService;
 BLEServer *pServer;
 
 bool bleOnOff = false;
-bool bleConnected = false;
+byte bleConnected = 0;
 byte bleInitCounter = 0;
 bool deviceConnected = false; // BLE connection status
 
@@ -1158,7 +1158,7 @@ void wifiListenerLoop(void * parameter)
             String noAPMessage = "Could not find any AP";
             String noAPTryAgain = ", trying again";
             detachInterrupt(doutPin);
-            vTaskDelay(1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             scanResult = scanWiFi(); 
             attachInterrupt(doutPin, ISR, FALLING);         
             if (!scanResult) {
@@ -1171,7 +1171,7 @@ void wifiListenerLoop(void * parameter)
           if (scanResult) {
             // If AP was found, start connection
             detachInterrupt(doutPin);
-            vTaskDelay(1);
+            vTaskDelay(pdMS_TO_TICKS(1));
             connectWiFi();
             attachInterrupt(doutPin, ISR, FALLING);
       
@@ -1210,7 +1210,18 @@ void wifiListenerLoop(void * parameter)
       //    noInterrupts();//portDISABLE_INTERRUPTS();//detachInterrupt(doutPin);//, ISR, FALLING);
       cli();
 
-      if (bleOnOff && !bleConnected) {
+      /* see definition in
+      * ~/.arduino15/packages/esp32/hardware/esp32/1.0.1/tools/sdk/include/bt/esp_bt.h:
+      * typedef enum {
+      *     ESP_BT_CONTROLLER_STATUS_IDLE = 0,
+      *     ESP_BT_CONTROLLER_STATUS_INITED,
+      *     ESP_BT_CONTROLLER_STATUS_ENABLED,
+      *     ESP_BT_CONTROLLER_STATUS_NUM,
+      * } esp_bt_controller_status_t; 
+      * 
+      * c lang default is to assign typedef enums ascending numbers, ie 0, 1, 2...
+      */
+      if (!(bleConnected == 2)) {
       /*esp_bt_controller_enable(ESP_BT_MODE_BTDM);
              btStart();
              while (!btStarted());
@@ -1228,14 +1239,14 @@ void wifiListenerLoop(void * parameter)
       */
       do {
         bleConnected = esp_bt_controller_get_status();
-      } while (!bleConnected);
+      } while (!(bleConnected == 2));
       /*
        bleInitCounter++;
        Serial.println(bleInitCounter);
       */
       Serial.printf("\n\ndisabling BLE will result in restarting the scale atm. Sorry!\n\n");
       //  Serial.printf("ble stat: %d\n", bleConnected);
-      } else if (!bleOnOff && bleConnected) {
+      } else if (bleConnected) {
         ESP.restart();
         /*
           esp_bluedroid_disable();
@@ -2266,7 +2277,7 @@ byte drawMenu(byte menuPlace) {
   }
   if (!statusWIFI()) _menu.concat("\nturn WiFi on\n");
   else _menu.concat("\nturn WiFi off\n");
-  if (!bleOnOff) _menu.concat("turn BLE on");
+  if (!(bleConnected == 2)) _menu.concat("turn BLE on");
   else _menu.concat("turn BLE off (reset)");
   const char* menu = (const char*)_menu.c_str();
   dataScreen.setFont(u8g2_font_8x13_mf);
