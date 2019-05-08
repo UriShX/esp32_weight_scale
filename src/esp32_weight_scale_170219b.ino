@@ -411,7 +411,7 @@ void setup() {
     NULL,
     1,
     &wifiListenerTask,
-    0);
+    1);
   delay(500);
 
   rtc_clk_cpu_freq_set(RTC_CPU_FREQ_80M); // Set SoC RTC to 80MHz, for HX711 communication
@@ -685,7 +685,10 @@ void loop() {
     case 3:
       Serial.printf("case:%d\n",memCase);
       if (statusWIFI()) {
-        if (sheets[0] != "") break;
+        if (sheets[0] != "") {
+          xEventGroupSetBits(caseEventGroup, (1 << BIT_GET_S));
+          break;
+        }
         cli();//not implemented in esp32
         scale.powerDown();             // put the ADC in sleep mode
         Serial.println("\nReading Google Spreadsheet data...");
@@ -696,7 +699,6 @@ void loop() {
         xEventGroupSetBits(caseEventGroup, (1 << BIT_GET_S));
       } else {
         Serial.println("connect to WiFi (type 'wifi' in terminal) to complete this task");
-        
       }
       setCase = memCase;
       // menuPlace = memCase; 
@@ -1168,14 +1170,11 @@ void wifiListenerLoop(void * parameter)
           do {
             String noAPMessage = "Could not find any AP";
             String noAPTryAgain = ", trying again";
-            // detachInterrupt(doutPin);
-            // vTaskDelay(pdMS_TO_TICKS(1));
             do {
               vTaskDelay(20);
             } while (xSemaphoreTake(cacheAvailableForInterrupt,0) != pdPASS);
             scanResult = scanWiFi(); 
-            xSemaphoreGive(cacheAvailableForInterrupt);
-            // attachInterrupt(doutPin, ISR, FALLING);         
+            xSemaphoreGive(cacheAvailableForInterrupt);     
             if (!scanResult) {
               scanTrials++;
               if (scanTrials < 4) noAPMessage.concat(noAPTryAgain);
@@ -1185,14 +1184,13 @@ void wifiListenerLoop(void * parameter)
           
           if (scanResult) {
             // If AP was found, start connection
-            // detachInterrupt(doutPin);
-            // vTaskDelay(pdMS_TO_TICKS(1));
             do {
               vTaskDelay(20);
             } while (xSemaphoreTake(cacheAvailableForInterrupt,0) != pdPASS);
             connectWiFi();
-            xSemaphoreGive(cacheAvailableForInterrupt);
-            // attachInterrupt(doutPin, ISR, FALLING);
+            do {
+              vTaskDelay(20);
+            } while (xSemaphoreGive(cacheAvailableForInterrupt) != pdPASS);
       
             bool isConnected = statusWIFI();
             while (!isConnected) {
@@ -1452,10 +1450,10 @@ byte doGet(String _host, uint16_t _port, String _toSend) {
     Serial.printf("URL: %s,\tport: %i,\nuri: %s\n", _host.c_str(), _port, _toSend.c_str());
     if (wificlient.connect(_host.c_str(), _port) == true) // Try to connect Google APIs server at port 443 (https)
     {
-      //         = getSheets; // GET string to be sent (retrieve sheet titles)
-      //        // Append key to be read from the spreadsheet
-      //        toSend += "getScope=sheets";
-      //        toSend += key; // Add API key
+            //   = getSheets; // GET string to be sent (retrieve sheet titles)
+            //  // Append key to be read from the spreadsheet
+            //  toSend += "getScope=sheets";
+            //  toSend += key; // Add API key
       _toSend += " HTTP/1.1"; // End of GET instruction
 
       wificlient.println(_toSend.c_str()); // Send GET to server
@@ -1583,9 +1581,9 @@ byte doGet(String _host, uint16_t _port, String _toSend) {
           else {
             _empty = true;
           }
-//        }
-//      }
-//      spreadsheetBuffer.clear();
+      //   }
+      // }
+      // spreadsheetBuffer.clear();
       wificlient.stop();  // Stop connection to the server
     }
     else
@@ -1776,21 +1774,22 @@ void send2GoogleSheets() {
   if (doGet(host, httpsPort, toSend) == 0) {
     //    toSend = "";
     // Store values and convert to float
-    JsonObject& root2 = spreadsheetBuffer.parseObject(toSend.c_str());
-    if (!root2.success()) {
+    // JsonObject& root2 = spreadsheetBuffer.parseObject(toSend.c_str());
+    if (!recievedResponse) {//!root2.success()) {
       Serial.println(F("POST failed!"));
       return;
     } else {
-      root2.printTo(Serial);
-      Serial.println();
+      recievedResponse = false;
+    //   root2.printTo(Serial);
+    //   Serial.println();
 
-      // Update display
-      if (sheets[0] != "") {
-        Serial.println("Response:");
-        for (byte t = 0; t < MAX_SHEETS; t++) {
-          if (sheets[t] != "") Serial.println(sheets[t]);
-        }
-      }
+    //   // Update display
+    //   if (sheets[0] != "") {
+    //     Serial.println("Response:");
+    //     for (byte t = 0; t < MAX_SHEETS; t++) {
+    //       if (sheets[t] != "") Serial.println(sheets[t]);
+    //     }
+    //   }
     }
   } else {
     Serial.print("Response is (null): ");
@@ -1924,11 +1923,15 @@ void sheetSelectionMenu (void *parameter)
     if (bitRead(sheetOrFormula, BIT_GET_S))
     {
       int8_t selectedSheetInt = drawDBData();
-      if (selectedSheetInt >= 0) {
-      selectedSheet = sheets[selectedSheetInt];
-      _case = 4;
-      xQueueOverwrite(controlCase, &_case);
-      xSemaphoreGive(caseChangeSemaphore);
+      if (selectedSheetInt != -1) {
+        if (selectedSheetInt >= 0) {
+          selectedSheet = sheets[selectedSheetInt];
+          _case = 4;
+        } else if (selectedSheetInt == -2) {
+          _case = 3;
+        }
+        xQueueOverwrite(controlCase, &_case);
+        xSemaphoreGive(caseChangeSemaphore);
       }
     }
         
@@ -2215,13 +2218,18 @@ int8_t drawFormula() {
 
 int8_t drawDBData() {
   String _menu = "";
+  byte nonZeroSheets = 0;
   if (sheets[0] != "") {
     for (byte t = 0; t < MAX_SHEETS; t++) {
       if (sheets[t] != "") {
         if (t != 0) _menu.concat("\n");
         _menu.concat(sheets[t]);
+        nonZeroSheets++;
       }
     }
+    _menu.concat("\nRepeat get formulas");
+    nonZeroSheets++;
+
     const char* menu = (const char*)_menu.c_str();
     dataScreen.setFont(u8g2_font_8x13_mf);
     dataScreen.setCursor(0, 5);
@@ -2234,6 +2242,9 @@ int8_t drawDBData() {
       if (menuPlace == 0) {
         inMenu = false;
         return -1;
+      } else if ((menuPlace - 1) == nonZeroSheets) {
+        inMenu = false;
+        return -2;
       } else {
         inMenu = false;
         return(menuPlace - 1);
