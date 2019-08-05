@@ -1,0 +1,18 @@
+/**
+ * Google sheets ID, API key, and Google script 
+ */
+
+#ifndef GSCRIPT_H
+    #define GSCRIPT_H
+
+String spreadSheetID = "REPLACE_WITH_YOUR_GOOGLE_SHEET_ID";  // ID from Google spreadsheet
+String key = "key=REPLACE_THIS_PART_WITH_GOOGLE_API_KEY";    // Google API key
+
+#define SHEET_SCRIPT_URI "/macros/s/REPLACE_THIS_PART_WITH_YOUR_APP_SCRIPT_ID/exec?" // Google app script ID
+
+// /** Google sheets connection setup **/
+String host = "script.google.com";
+String googleAPI = "sheets.googleapis.com";
+const uint16_t httpsPort = 443;
+
+#endif GSCRIPT_H
