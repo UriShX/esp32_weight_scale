@@ -233,28 +233,11 @@ HX711_ADC scale(doutPin, sckPin);
 
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED; // Supposedly, help make external interrupts possible
 
-// /** Google sheets connection setup **/
-// String host = "script.google.com";
-// String googleAPI = "sheets.googleapis.com";
-// const uint16_t httpsPort = 443;
-
-// String spreadSheetID = "185nivAiZCSP7wAxyEsiGpCG9iFRDAQEIe9eeO0uELeM";  // ID from Google spreadsheet
-// String key = "key=AIzaSyDQ2lzlrUXEBTyEImagyatppqkKOCjVdMU";            // Google API key
-// // The ID below comes from Google Sheets.
-// // Towards the bottom of this page, it will explain how this can be obtained
-// const char *GScriptId = "AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg";
-// //https://script.google.com/macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec
-
 String selectedSheet;
 String toSend = "";
 bool redirected = false;
 bool recievedResponse = false;
 byte connectionCounter = 0;
-
-//String getString = "GET /v4/spreadsheets/" + spreadSheetID + "/values/";
-//String getSheets = "GET /v4/spreadsheets/" + spreadSheetID + "?fields=sheets.properties.title&";// + key + " HTTP/1.1";
-//String getSheetsScript = "GET /macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec?";
-// #define SHEET_SCRIPT_URI "/macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec?"
 
 #define MAX_SHEETS 5
 #define MAX_INGREDIENTS 10
