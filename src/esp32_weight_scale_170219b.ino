@@ -3,21 +3,23 @@
    Using google sheets as databse, pulling percent of ingredient in recipe and calculate
    against load cell measurement taken using hx711 ADC w/amp for load cell.
    Displays next ingredient and how much still needs to be placed on scale
-   on I2C based 2004 alphanumeric LCD.
-   Uses ESP32's touch buttons for navigation.
+   on 2x I2C based use 128*64 OLED screen.
+   Uses 4 push buttons for navigation.
    v0.1 by Uri Shani, 2018. No guarantees provided with this software.
    Licensed under ?? LGPL???
 
    Breadsheet read / write scale *Star Simpson @starsandrobots qoute on Twitter
 
+   See https://hackaday.io/project/164849-yet-another-smart-kitchen-scale for documentation
+   and https://gist.github.com/UriShX/e7182e1b6a151302f28b664d037c8b49 for Google sheets app script
+
    Credits:
    Google sheets use IgorF2 https://www.instructables.com/id/IoT-Wallet-smart-Wallet-With-Firebeetle-ESP32-Ardu/
    HX711 on ESP32 Andreas Spiess https://github.com/SensorsIot/Weight-Sensors
    WiFi configuration over BLE https://desire.giesecke.tk/index.php/2018/04/06/esp32-wifi-setup-over-ble/
-   thunkable android app based on https://www.instructables.com/id/ESP32-BLE-Android-App-Arduino-IDE-AWESOME/
 
    Future:
-   use 128*64 OLED screen
+   Use ESP32's touch buttons instead of mechanical buttons
    use HTTPclient and markdown.js to display further instructions
 *********/
 //#include <Arduino.h>
@@ -44,6 +46,7 @@
 #include <nvs_flash.h>
 // include additional files
 // #include "display.h"
+#include "google_script_stuff.h" // Google app script and sheet ID & API key. Separated out for easier sharing
 
 
 // ----------------------------
@@ -230,17 +233,17 @@ HX711_ADC scale(doutPin, sckPin);
 
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED; // Supposedly, help make external interrupts possible
 
-/** Google sheets connection setup **/
-String host = "script.google.com";
-String googleAPI = "sheets.googleapis.com";
-const uint16_t httpsPort = 443;
+// /** Google sheets connection setup **/
+// String host = "script.google.com";
+// String googleAPI = "sheets.googleapis.com";
+// const uint16_t httpsPort = 443;
 
-String spreadSheetID = "185nivAiZCSP7wAxyEsiGpCG9iFRDAQEIe9eeO0uELeM";  // ID from Google spreadsheet
-String key = "key=AIzaSyDQ2lzlrUXEBTyEImagyatppqkKOCjVdMU";            // Google API key
-// The ID below comes from Google Sheets.
-// Towards the bottom of this page, it will explain how this can be obtained
-const char *GScriptId = "AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg";
-//https://script.google.com/macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec
+// String spreadSheetID = "185nivAiZCSP7wAxyEsiGpCG9iFRDAQEIe9eeO0uELeM";  // ID from Google spreadsheet
+// String key = "key=AIzaSyDQ2lzlrUXEBTyEImagyatppqkKOCjVdMU";            // Google API key
+// // The ID below comes from Google Sheets.
+// // Towards the bottom of this page, it will explain how this can be obtained
+// const char *GScriptId = "AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg";
+// //https://script.google.com/macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec
 
 String selectedSheet;
 String toSend = "";
@@ -251,7 +254,7 @@ byte connectionCounter = 0;
 //String getString = "GET /v4/spreadsheets/" + spreadSheetID + "/values/";
 //String getSheets = "GET /v4/spreadsheets/" + spreadSheetID + "?fields=sheets.properties.title&";// + key + " HTTP/1.1";
 //String getSheetsScript = "GET /macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec?";
-#define SHEET_SCRIPT_URI "/macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec?"
+// #define SHEET_SCRIPT_URI "/macros/s/AKfycbzbM1shFEMwv7N7XB4llUZdtGvo1uYSS-7-q84SHYQ0vq6qzLg/exec?"
 
 #define MAX_SHEETS 5
 #define MAX_INGREDIENTS 10
